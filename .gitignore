@@ -1,0 +1,13 @@
+node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+.cache/
+bin/
+dist/
+.env
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+*.pyc
