@@ -1,0 +1,95 @@
+name: pgfy
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+services:
+  application:
+    image: ${APP_IMAGE:?release image is required}
+    platform: linux/amd64
+    user: "10001:10001"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PGFY_TRUSTED_PROXY: ${PROXY_SUBNET:?proxy subnet is required}
+    volumes:
+      - ${INSTALL_DIR:?installation directory is required}/data/sqlite:/data
+      - ${INSTALL_DIR}/config:/etc/pgfy:ro
+      - ${INSTALL_DIR}/secrets/encryption_key:/run/secrets/encryption_key:ro
+      - ${INSTALL_DIR}/secrets/health_password:/run/secrets/health_password:ro
+    tmpfs:
+      - /tmp:size=16777216,mode=1777
+      - /var/lib/postgresql:size=1048576,mode=0700,uid=10001,gid=10001
+    networks: [database, proxy]
+    healthcheck:
+      test: [CMD, pgfy, health]
+      interval: 15s
+      timeout: 6s
+      retries: 3
+    logging: *logging
+  postgres:
+    image: ${POSTGRES_IMAGE:?postgres image is required}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pgfy_bootstrap
+      POSTGRES_DB: pgfy_system
+      POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+      PGDATA: /var/lib/postgresql/18/docker
+    command: [postgres, -c, password_encryption=scram-sha-256, -c, hba_file=/etc/pgfy/pg_hba.conf, -c, log_statement=none, -c, log_min_error_statement=panic, -c, max_connections=60]
+    volumes:
+      - postgres:/var/lib/postgresql
+      - ${INSTALL_DIR}/secrets/bootstrap_password:/run/secrets/bootstrap_password:ro
+      - ${INSTALL_DIR}/secrets/health_password:/run/secrets/health_password:ro
+      - ${INSTALL_DIR}/config/installation-id:/etc/pgfy/installation-id:ro
+      - ${INSTALL_DIR}/config/pg_hba.conf:/etc/pgfy/pg_hba.conf:ro
+      - ./postgres/init.sh:/docker-entrypoint-initdb.d/10-pgfy.sh:ro
+      - ./postgres/health.sh:/usr/local/bin/pgfy-postgres-health:ro
+    networks: [database]
+    healthcheck:
+      test: [CMD, bash, /usr/local/bin/pgfy-postgres-health]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: *logging
+  caddy:
+    image: ${CADDY_IMAGE:?caddy image is required}
+    platform: linux/amd64
+    restart: unless-stopped
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ${INSTALL_DIR}/config/caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [proxy]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8081/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging: *logging
+networks:
+  database:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${DATABASE_SUBNET:?database subnet is required}
+  proxy:
+    ipam:
+      config:
+        - subnet: ${PROXY_SUBNET}
+volumes:
+  postgres:
+    name: ${VOLUME_PREFIX:?stable volume prefix is required}_postgres
+  caddy_data:
+    name: ${VOLUME_PREFIX}_caddy_data
+  caddy_config:
+    name: ${VOLUME_PREFIX}_caddy_config
