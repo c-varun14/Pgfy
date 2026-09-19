@@ -20,6 +20,9 @@ import (
 	"time"
 
 	"github.com/c-varun14/Pgfy/internal/config"
+	"github.com/c-varun14/Pgfy/internal/jobs"
+	"github.com/c-varun14/Pgfy/internal/postgres"
+	"github.com/c-varun14/Pgfy/internal/provision"
 	"github.com/c-varun14/Pgfy/internal/security"
 	"github.com/c-varun14/Pgfy/internal/store"
 )
@@ -33,6 +36,10 @@ type Server struct {
 	Assets       fs.FS
 	Versions     map[string]string
 	TrustedProxy netip.Prefix
+	Mgmt         *postgres.Management
+	Provisioner  *provision.Provisioner
+	Jobs         *jobs.Worker
+	TLSStatePath string
 	Now          func() time.Time
 	limiter      rateLimit
 	hashSlots    chan struct{}
@@ -97,6 +104,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/session", s.session)
 	mux.HandleFunc("GET /api/v1/system/status", s.status)
 	mux.HandleFunc("GET /api/v1/settings", s.settings)
+	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
+	mux.HandleFunc("POST /api/v1/projects", s.createProject)
+	mux.HandleFunc("GET /api/v1/projects/{id}", s.getProject)
+	mux.HandleFunc("POST /api/v1/projects/{id}/retry", s.retryProject)
+	mux.HandleFunc("GET /api/v1/projects/{id}/credentials", s.getCredentials)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/access", s.updateAccess)
+	mux.HandleFunc("POST /api/v1/projects/{id}/connection-checks", s.createConnectionCheck)
+	mux.HandleFunc("GET /api/v1/projects/{id}/connection-checks/{check}", s.getConnectionCheck)
+	mux.HandleFunc("GET /api/v1/settings/storage", s.getStorage)
+	mux.HandleFunc("PUT /api/v1/settings/storage", s.putStorage)
+	mux.HandleFunc("POST /api/v1/settings/storage/check", s.checkStorage)
+	mux.HandleFunc("POST /api/v1/projects/{id}/backups", s.startBackup)
+	mux.HandleFunc("GET /api/v1/projects/{id}/backups", s.listBackups)
+	mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
+	mux.HandleFunc("GET /api/v1/recovery/backups", s.listRecoveryBackups)
+	mux.HandleFunc("POST /api/v1/recovery/restores", s.startRestore)
 	mux.HandleFunc("/", s.static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-ID", security.Token()[:16])
@@ -111,7 +134,7 @@ func (s *Server) Handler() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/health/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), baseContextKey{}, r.Context()), 10*time.Second)
 		defer cancel()
 		r = r.WithContext(ctx)
 		defer func() {
@@ -141,6 +164,19 @@ func (s *Server) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 }
+
+type baseContextKey struct{}
+
+// contextWithTimeout derives from the request's pre-timeout context so slow
+// external calls (object storage) get their own explicit bound.
+func contextWithTimeout(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
+	base, _ := r.Context().Value(baseContextKey{}).(context.Context)
+	if base == nil {
+		base = r.Context()
+	}
+	return context.WithTimeout(base, d)
+}
+
 func write(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -317,6 +353,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (store.Sessio
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	session, _, ok := s.authorize(w, r)
 	if ok {
+		// The caller's address helps "restrict to my IP"; it is the proxy-reported client.
+		session.ClientIP = s.client(r)
 		write(w, 200, session)
 	}
 }
@@ -348,7 +386,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	var sqliteVersion string
 	_ = s.Store.DB.QueryRowContext(r.Context(), "SELECT sqlite_version()").Scan(&sqliteVersion)
-	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": "not_configured"})
+	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": "not_configured", "database_access": s.databaseAccess()})
 }
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); ok {
