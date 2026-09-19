@@ -16,11 +16,15 @@ services:
     security_opt: [no-new-privileges:true]
     environment:
       PGFY_TRUSTED_PROXY: ${PROXY_SUBNET:?proxy subnet is required}
+      PGFY_TUNNEL_SOURCE: ${TUNNEL_SOURCE:?tunnel source address is required}
     volumes:
-      - ${INSTALL_DIR:?installation directory is required}/data/sqlite:/data
+      - ${INSTALL_DIR}/data/sqlite:/data
+      - ${INSTALL_DIR}/data/work:/work
       - ${INSTALL_DIR}/config:/etc/pgfy:ro
+      - ${INSTALL_DIR}/config/pg/managed:/etc/pgfy/pg/managed
       - ${INSTALL_DIR}/secrets/encryption_key:/run/secrets/encryption_key:ro
       - ${INSTALL_DIR}/secrets/health_password:/run/secrets/health_password:ro
+      - ${INSTALL_DIR}/secrets/management_password:/run/secrets/management_password:ro
     tmpfs:
       - /tmp:size=16777216,mode=1777
       - /var/lib/postgresql:size=1048576,mode=0700,uid=10001,gid=10001
@@ -41,16 +45,20 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
       PGDATA: /var/lib/postgresql/18/docker
-    command: [postgres, -c, password_encryption=scram-sha-256, -c, hba_file=/etc/pgfy/pg_hba.conf, -c, log_statement=none, -c, log_min_error_statement=panic, -c, max_connections=60]
+    command: [postgres, -c, password_encryption=scram-sha-256, -c, hba_file=/etc/pgfy/pg/pg_hba.conf, -c, log_statement=none, -c, log_min_error_statement=panic, -c, max_connections=60, -c, ssl=on, -c, ssl_cert_file=/etc/pgfy/tls/server.crt, -c, ssl_key_file=/etc/pgfy/tls/server.key, -c, ssl_min_protocol_version=TLSv1.2]
+    ports:
+      - "${PG_BIND:?postgres bind address is required}:5432:5432"
     volumes:
       - postgres:/var/lib/postgresql
       - ${INSTALL_DIR}/secrets/bootstrap_password:/run/secrets/bootstrap_password:ro
       - ${INSTALL_DIR}/secrets/health_password:/run/secrets/health_password:ro
+      - ${INSTALL_DIR}/secrets/management_password:/run/secrets/management_password:ro
       - ${INSTALL_DIR}/config/installation-id:/etc/pgfy/installation-id:ro
-      - ${INSTALL_DIR}/config/pg_hba.conf:/etc/pgfy/pg_hba.conf:ro
+      - ${INSTALL_DIR}/config/pg:/etc/pgfy/pg:ro
+      - ${INSTALL_DIR}/config/postgres-tls:/etc/pgfy/tls:ro
       - ./postgres/init.sh:/docker-entrypoint-initdb.d/10-pgfy.sh:ro
       - ./postgres/health.sh:/usr/local/bin/pgfy-postgres-health:ro
-    networks: [database]
+    networks: [database, dbpublic]
     healthcheck:
       test: [CMD, bash, /usr/local/bin/pgfy-postgres-health]
       interval: 10s
@@ -86,6 +94,11 @@ networks:
     ipam:
       config:
         - subnet: ${PROXY_SUBNET}
+  # Only PostgreSQL joins this network; it exists so port 5432 can be published.
+  dbpublic:
+    ipam:
+      config:
+        - subnet: ${PUBLIC_SUBNET}
 volumes:
   postgres:
     name: ${VOLUME_PREFIX:?stable volume prefix is required}_postgres

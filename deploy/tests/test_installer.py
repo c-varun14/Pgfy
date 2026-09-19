@@ -10,6 +10,8 @@ spec = importlib.util.spec_from_file_location("installer", Path(__file__).parent
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
+TEST_STATE = {"release": "v0.1.0", "volume_prefix": "test", "images": {"application": "a", "postgres": "p", "caddy": "c"}, "database_subnet": "172.20.240.0/24", "proxy_subnet": "172.20.241.0/24", "public_subnet": "172.20.242.0/24"}
+
 class InstallerTests(unittest.TestCase):
     def test_interrupted_pull_retry_keeps_installation_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -22,7 +24,7 @@ class InstallerTests(unittest.TestCase):
             args = SimpleNamespace(bundle=str(bundle), dir=str(root), hostname="admin.example.com", tunnel=False)
             with patch.object(installer, "verify_bundle", return_value=release), \
                     patch.object(installer, "preflight", return_value=("29.8.0", "5.5.1")), \
-                    patch.object(installer, "select_subnets", return_value=("172.20.240.0/24", "172.20.241.0/24")) as subnets, \
+                    patch.object(installer, "select_subnets", return_value=("172.20.240.0/24", "172.20.241.0/24", "172.20.242.0/24")) as subnets, \
                     patch.object(installer.os, "chown"), \
                     patch.object(installer, "run", return_value=SimpleNamespace(returncode=1)), \
                     patch.object(installer.Installation, "compose") as compose:
@@ -73,6 +75,19 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("host all all ::/0 reject", hba)
         self.assertNotIn("trust", hba)
         self.assertNotIn("md5", hba)
+        lines = hba.splitlines()
+        include = lines.index("include_if_exists managed/projects.conf")
+        # System roles are admitted from the private subnet and rejected everywhere else
+        # before the dashboard-managed include, so that file cannot widen their access.
+        for role in ("pgfy_bootstrap", "pgfy_health", "pgfy_mgmt"):
+            self.assertLess(lines.index(f"host all {role} all reject"), include)
+        self.assertLess(include, lines.index("host all all 0.0.0.0/0 reject"))
+
+    def test_compose_env_binds_postgres_by_mode(self):
+        state = {"images": {"application": "a", "postgres": "p", "caddy": "c"}, "volume_prefix": "pgfy_x", "database_subnet": "172.20.240.0/24", "proxy_subnet": "172.20.241.0/24", "public_subnet": "172.20.242.0/24"}
+        self.assertIn("PG_BIND=0.0.0.0", installer.compose_env(Path("/opt/x"), state, {"mode": "https"}))
+        self.assertIn("TUNNEL_SOURCE=172.20.242.1/32", installer.compose_env(Path("/opt/x"), state, {"mode": "https"}))
+        self.assertIn("PG_BIND=127.0.0.1", installer.compose_env(Path("/opt/x"), state, {"mode": "tunnel"}))
 
     def test_version_floors(self):
         self.assertFalse(installer.version_at_least("27.5.1", (28, 0, 0)))
@@ -90,7 +105,7 @@ class InstallerTests(unittest.TestCase):
     def test_failed_access_change_rolls_back(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            installer.json_write(root / "state.json", {"release": "v0.1.0", "volume_prefix": "test"})
+            installer.json_write(root / "state.json", TEST_STATE)
             old = {"mode": "tunnel", "hostname": "", "origin": "http://127.0.0.1:8080", "generation": "old"}
             installation = installer.Installation(root)
             installation.write_access(old)
@@ -107,7 +122,7 @@ class InstallerTests(unittest.TestCase):
     def test_successful_host_recovery_does_not_require_database_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            installer.json_write(root / "state.json", {"release": "v0.1.0", "volume_prefix": "test"})
+            installer.json_write(root / "state.json", TEST_STATE)
             installation = installer.Installation(root)
             installation.write_access({"mode": "https", "hostname": "broken.example.com", "origin": "https://broken.example.com", "generation": "old"})
             with patch.object(installation, "compose"), patch.object(installation, "validate_caddy"), patch.object(installation, "verify") as verify:
@@ -118,7 +133,7 @@ class InstallerTests(unittest.TestCase):
     def test_explicit_rollback_restores_saved_caddy_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            installer.json_write(root / "state.json", {"release": "v0.1.0", "volume_prefix": "test"})
+            installer.json_write(root / "state.json", TEST_STATE)
             installation = installer.Installation(root)
             original = {"mode": "tunnel", "hostname": "", "origin": "http://127.0.0.1:8080", "generation": "old"}
             saved_caddy = "# preserved host configuration\n" + installer.caddyfile(original)
