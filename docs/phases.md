@@ -6,8 +6,17 @@ Phases 1–4 implement the complete MVP. Phase 3 proves the highest-risk recover
 the submission. Phase 6 is the mandatory gate before running the operator's own modest production applications under one trusted admin.
 The submission deadline does not reduce MVP acceptance criteria or establish production readiness. PgBouncer is not a submission dependency.
 
-Build basic usability into every phase. Start the demo script immediately, record a usable version once recovery works, and reserve roughly
-the final quarter of available time for deployment checks, fixes, and recording. A working recovery demo is an early fallback, not a claim
+The core setup is: install on a compatible VPS → configure an existing S3-compatible bucket in Settings → test storage → back up and recover.
+Compute and storage are independent choices. Keep one installer and one configurable S3 client; no provider-specific application builds,
+required AWS account, native storage adapters, or extra backup service. The initial second-host and second-storage checks remain MVP gates.
+Use the small validation set in [Phase 1 validation](phase1-validation.md#portability-validation-targets); broader provider matrices can wait.
+
+The operator supplies a VPS meeting the initial Ubuntu 24.04 LTS x86-64 requirements, root/sudo access, and DNS/firewall configuration
+(or explicit SSH-tunnel access). Before enabling backups, they create a private S3-compatible bucket and scoped credentials with their chosen
+provider. Pgfy installs and configures the software, then manages backups through Settings; it does not provision cloud infrastructure.
+
+Build basic usability into every phase. Prepare the recognizable demo dataset and script immediately, record a usable version once recovery
+works, and reserve roughly the final quarter of available time for deployment checks, fixes, and recording. A working recovery demo is an early fallback, not a claim
 that unfinished scheduling or management features are complete.
 
 ## Phase 1 — Secure foundation
@@ -40,6 +49,11 @@ Build:
   and a documented rollback path. No dashboard domain editor, public HTTP cutover workflow, HTTPS-confirmation API, or app access to Caddy admin.
 - A versioned release bundle containing the installer, Compose configuration, image digests, and checksums. CI builds the app image; target
   servers need neither Go nor Node. Support installation from a downloaded bundle and default to `/opt/firstcommit`.
+- A single copy-paste install command using a small bootstrap script downloaded with `curl` over HTTPS from the project's release channel.
+  It downloads a selected versioned bundle and its checksum, verifies before extraction/execution, and invokes the existing installer.
+  Support dashboard hostname or explicit SSH-tunnel mode and the installation directory option. Reuse existing installation logic and
+  preserve release selection and data on reruns; never turn a rerun into an implicit update. Retain downloaded-bundle installation as an
+  alternative. On success, print the dashboard address and setup instructions using the installer's existing token handling.
 - Ubuntu 24.04 LTS on x86-64; Docker Engine 28+ and Compose 2.30+. Install a supported, tested Docker patch release from Docker's official
   repository for Ubuntu when absent, preserve compatible installations, and report incompatible ones without replacing them.
 - Start validation with 2 vCPU, 2 GiB RAM, and 20 GiB free disk on both hosts. Publish measured results; these are provisional test minimums,
@@ -60,6 +74,8 @@ confirmation endpoints. Database provisioning, database TLS/access rules, and ba
 
 Done when:
 
+- The published one-command bootstrap reaches setup on both validation hosts without manual download/extraction. Download or checksum
+  failures stop before invoking the bundle; reruns retain the installed release and state. Downloaded-bundle installation still works.
 - Fresh installation passes authenticated PostgreSQL queries, SQLite checks, and Caddy-to-app routing before reporting success. Domain mode
   verifies HTTPS; tunnel mode reports its restricted access explicitly. Failed certificate issuance must not enable public HTTP setup.
 - Admin setup rejects invalid, expired, reused, and concurrent tokens; exactly one admin is created. Test unauthorized access, session
@@ -71,6 +87,10 @@ Done when:
 - The same release artifact installs on Lightsail and a second independent non-AWS Ubuntu environment without provider-specific code.
 - Missing prerequisites, occupied ports, failed image pulls, and interrupted initialization produce actionable errors and safe reruns.
 - Go tests, frontend type/build checks, setup/login browser tests, Compose validation, and exact database/tool-version checks pass.
+
+After the Lightsail checks pass, Phase 2/3 implementation can proceed while second-host evidence remains pending. Both hosts must pass before
+claiming Phase 1 deployment acceptance or a complete MVP. Keep probes on every enabled public/private network path; omit IPv6 probes only
+when IPv6 is disabled and its absence of exposure is verified. Keep the existing release checksums and automated checks.
 
 ## Phase 2 — Create and connect safely
 
@@ -88,8 +108,13 @@ Build:
 - Per-project allowed IP/CIDR rules through a narrowly scoped mechanism limited to managed rule files, without PostgreSQL data-directory or
   arbitrary configuration access. Define validation, apply/reload, rollback, and real connection checks; `pg_hba_file_rules` alone only
   validates the file on disk and does not establish active enforcement.
-- PostgreSQL TLS using a stable database hostname and publicly trusted certificate. Implement explicit issuance, restricted key delivery,
-  renewal, and PostgreSQL reload without exposing Caddy's entire storage to the app. Caddy dashboard HTTPS alone does not provide database TLS.
+- PostgreSQL TLS using a stable database hostname and publicly trusted certificate managed by Caddy. Prefer its standard HTTP/TLS-ALPN
+  challenges when that hostname resolves to the server and Caddy is reachable on 80/443; do not require DNS-provider API credentials for
+  ordinary installation. DNS-01 is an optional deployment path requiring the appropriate Caddy module and scoped DNS credentials.
+- Use a small host-managed mechanism to deliver only the database certificate/key into a directory mounted read-only by PostgreSQL, with
+  PostgreSQL-compatible ownership and permissions. Validate replacements, preserve the working pair, reload on change, and verify a new
+  connection sees the replacement. Caddy manages issuance/renewal; the host mechanism handles delivery/reload. Do not expose Caddy's entire
+  storage or administration to the app. No separate certificate-management service; dashboard HTTPS alone does not provide database TLS.
 - Client examples that verify hostname and trust chain (`verify-full` for libpq), including CA trust configuration appropriate to the driver.
   Document a DNS-only database record for Cloudflare deployments; ordinary HTTP proxying does not support direct PostgreSQL connections.
 - Documented operator-managed Lightsail firewall setup, generic provider/host firewall requirements, and an SSH-tunnel path for local development.
@@ -106,8 +131,9 @@ Done when:
 
 - Two projects work with their own credentials, without cross-project connections or data access.
 - A permitted application source connects with TLS and verified server identity.
-- Certificate renewal and reload work, including retry after issuance failure; invalid/expired certificates and hostname mismatches fail
-  client verification. Preserve the working certificate until a valid replacement is ready.
+- Certificate issuance, retry after issuance failure, and a valid replacement through the delivery/reload path work; invalid/expired
+  certificates and hostname mismatches fail client verification. Preserve the working certificate until a valid replacement is ready.
+  Full automatic-renewal failure/retry exercises remain in Phase 6.
 - A disallowed source and a non-TLS remote connection are rejected; test IPv6 too if enabled.
 - Invalid rule changes preserve the previous working policy and administrative access.
 - The SSH-tunnel path works without a public database port.
@@ -122,6 +148,8 @@ Build the smallest end-to-end recovery path:
 
 - Configurable S3-compatible backup location and scoped access; use AWS S3 for the demo and configure replacement-server authorization independently.
 - Storage settings for HTTPS endpoint, signing region, bucket/prefix, supplied credentials, optional session token, and addressing mode.
+- One S3 client uses these settings for every store. Do not hardcode AWS endpoint/region lists or require IAM APIs, object ACLs, tagging, KMS,
+  bucket provisioning, or provider-native APIs. The operator supplies an existing private bucket and scoped credentials.
 - Explicit scoped storage credentials on Lightsail; no dependency on EC2 instance roles or AWS-specific storage-management APIs.
 - A storage check exercising upload, list/discovery, download/integrity verification, and temporary-object cleanup in the configured prefix.
 - Portable object operations, manifests, and integrity checks; define backup size limits and test multipart upload/abort where required.
@@ -162,12 +190,14 @@ Also test browser closure and process interruption during dump, upload, and rest
 and safe retry without overwriting the original database. Bound subprocess execution and clean temporary work when safe. The durable worker
 is part of this milestone, not deferred to dashboard polish.
 
-Portability gate: Repeat backup discovery and restoration against a non-AWS S3-compatible endpoint using configuration changes only. Restore
-to the second compatible Linux environment without requiring the original host's provider, identity, address, or metadata. Check wrong
+Record a usable demo immediately after the first successful AWS recovery; do not wait for portability checks or dashboard refinement.
+
+Portability gate: Repeat backup creation, discovery, and restoration against a non-AWS S3-compatible endpoint using configuration changes only.
+Restore to the second compatible Linux environment without requiring the original host's provider, identity, address, or metadata. Check wrong
 credentials, an invalid endpoint, missing object permissions, and integrity failures. Record tested configurations and limitations without
 naming alternative providers or making price comparisons in public product copy. Cloud independence is part of this phase, not future work.
 
-Record a usable demo now. This is the core technical proof; Phase 4 turns it into the complete dashboard experience.
+This is the core technical proof; Phase 4 turns it into the complete dashboard experience.
 
 ## Phase 4 — Complete the management experience
 
@@ -177,6 +207,8 @@ Build:
 
 - Four navigation areas: Projects, Project details, Recovery, and Settings.
 - Provider-neutral storage setup with AWS defaults, custom endpoint/region/addressing controls, masked credentials, and the storage connection check.
+  All storage configuration is available in Settings; choosing a compatible store requires no code, image, or Compose changes. Use one
+  storage form and the same worker for every endpoint, with addressing mode and optional session token under advanced settings.
 - A simple daily backup schedule inherited by new projects once storage is configured, enqueueing the same durable jobs used by manual backup.
 - “Back up now,” backup history, and clear missing-storage or backup-failure states.
 - Dashboard integration with the Phase 3 persistent worker; keep one heavy job at a time and browser-independent execution.
@@ -241,6 +273,9 @@ Goal: Run one low-stakes application with tested recovery and explicit maintenan
 
 ### Production gate
 
+Start post-demo work with retention, external alerts, abandoned-work cleanup, the manual update procedure, and runbook-only recovery.
+Every requirement below remains mandatory before real workloads; this ordering does not make the other checks optional.
+
 - Review setup-token recovery, credentials at rest and in logs, TLS/certificate renewal, permissions, and actual network exposure.
 - Exercise automatic database certificate renewal, failure/retry, and credential rotation without losing administrative access. Verify the
   installation key is protected separately from SQLite and fresh-server recovery does not depend on it.
@@ -285,5 +320,6 @@ Prioritize according to observed usage:
 Keep database updates within the supported major version. Automated major upgrades, high availability, and point-in-time recovery require
 separate designs and remain outside this plan’s MVP.
 
-Working rule: Finish each phase’s acceptance checks before expanding its feature set. Prove recovery early, complete the user journeys, and
-protect time for a clear submission.
+Working rule: Prioritize demo-visible behavior and security/data-correctness checks; defer visual extras and broader compatibility matrices.
+Track pending evidence explicitly, using the Phase 1 sequencing exception to unblock recovery work. Complete the initial portability checks
+before calling the MVP complete. Prove recovery early, complete the user journeys, and protect time for a clear submission.

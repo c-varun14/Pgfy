@@ -9,6 +9,10 @@ Hackathon: WeMakeDevs — AWS First Commit
 A self-hosted dashboard turns one VPS into an easy-to-manage PostgreSQL server for multiple small applications. Users own their server and data,
 and pay their infrastructure provider directly.
 
+The setup flow is: install on a compatible VPS, open Settings, enter an existing S3-compatible bucket's endpoint and credentials, test the
+connection, and enable backups. The VPS and storage provider are independent choices. Use the same release and application paths for each;
+switching providers requires configuration, not a custom build or another service.
+
 The MVP is complete when three journeys work end to end:
 
 1. Create a project database.
@@ -63,6 +67,10 @@ Keep provider-specific firewall instructions in deployment guides, outside core 
 Linux environment and a non-AWS S3-compatible endpoint before claiming it tested; document the tested configurations rather than promising
 universal compatibility. Public product copy describes capabilities and requirements without naming alternative providers or comparing prices.
 
+The initial second-host and second-storage validation remains part of the MVP, not post-production work. AWS is the first demo target.
+See the [validation targets](phase1-validation.md#portability-validation-targets) for the small initial set. Broader provider coverage can wait.
+Compatibility means meeting the documented OS, Docker, storage, networking, and S3-operation requirements; a provider label alone is not proof.
+
 For Lightsail, document an operator-managed static IP and public-IP firewall. A static IP can be reassigned during replacement-server recovery,
 but data restoration, TLS readiness, and application credential updates are still required. Static-IP reassignment is optional and must not
 become a dependency of the generic recovery procedure.
@@ -71,7 +79,15 @@ become a dependency of the generic recovery procedure.
 
 ### Installation and setup
 
-- Run one installation command with the dashboard hostname; rerunning it preserves data, configuration, secrets, and release selection.
+The operator prepares a compatible Ubuntu 24.04 LTS x86-64 VPS with root/sudo access, a dashboard DNS record and firewall rules, or explicit
+SSH-tunnel access without a domain. Before enabling backups, they supply an existing private S3-compatible bucket and scoped credentials.
+Pgfy handles software installation and backup management; creating the VPS, DNS records, firewall rules, bucket, and credentials stays with
+the operator. Storage is configured later in Settings and is not required to install the dashboard.
+
+- Run one copy-paste command that fetches a small bootstrap script with `curl` over HTTPS. The script downloads a selected versioned release
+  and checksum, verifies the bundle before extraction/execution, and invokes the existing installer with the dashboard hostname or explicit
+  tunnel mode. No manual download/extraction is required for this path. Reruns preserve data, configuration, secrets, and release selection.
+  Keep downloaded-bundle installation available as an alternative; print the dashboard address and setup instructions on success.
 - Obtain dashboard HTTPS before entering the setup token or admin credentials: install → open HTTPS → create admin.
 - Without a domain, explicitly enable loopback-only setup through an SSH tunnel. Never expose public HTTP administration on IP:3000.
 - Keep the hostname in host-managed installation configuration. Settings displays it; a host-side command handles domain changes and recovery.
@@ -132,8 +148,11 @@ IP restrictions are part of the MVP. They complement authentication, TLS, and da
 
 - Remote database access is disabled until explicitly configured.
 - Allow specific application-server IPs or narrow CIDR ranges. No “allow everyone” shortcut in the normal setup flow.
-- Require TLS for remote database connections, using a stable database hostname and a publicly trusted certificate. PostgreSQL needs its
-  own explicit certificate issuance, restricted key delivery, renewal, and reload mechanism; dashboard HTTPS alone does not provide it.
+- Require TLS for remote database connections, using a stable database hostname and a publicly trusted certificate managed by Caddy. Use
+  standard HTTP/TLS-ALPN challenges when reachable; ordinary installation must not require DNS-provider API credentials. DNS-01 is optional
+  and needs the appropriate module and scoped credentials. A small host-managed mechanism delivers only the database certificate/key with
+  correct permissions to a directory mounted read-only by PostgreSQL, preserves valid files on failure, and reloads on replacement. Caddy
+  renews certificates; delivery/reload must be tested separately. Dashboard HTTPS alone does not provide database TLS.
   Document hostname and trust-chain verification for each supported client (`verify-full` for libpq), including system CA configuration
   where supported. Encryption-only settings such as `sslmode=require` do not establish server identity.
 - Use separate restricted project credentials; never expose the management account as an application connection string.
@@ -176,6 +195,7 @@ immediately revoked.
 
 Verify real connections from both allowed and disallowed sources, including IPv6 where enabled. Docker-published ports can bypass ordinary
 UFW filtering, so configuration inspection alone is not sufficient. Document and test the actual provider firewall and Docker network path.
+Omit IPv6 probes only when IPv6 is disabled and its absence of exposure is verified.
 
 ## Backups and recovery
 
@@ -184,13 +204,17 @@ prefix, access key ID, secret access key, optional session token, and path-style
 hardcoding AWS domains or region lists. Validate endpoint configuration and restrict it to intended storage destinations; it must not expose
 cloud metadata or management services through arbitrary backend requests.
 
+Expose these settings in the dashboard using one storage form and one S3 client. Keep addressing mode and optional session token under
+advanced settings. The operator creates the private bucket and scoped credentials with their chosen provider; the app handles its own
+backup uploads, discovery, restoration, and cleanup. No provider-specific image, Compose edit, or separate backup agent is required.
+
 Keep the bucket private and access scoped to the required backup location and operations. For Lightsail, configure dedicated scoped storage
 credentials explicitly; do not assume an EC2 instance role is available. Support supplied credentials as the portable baseline; workload
 identity or a credential provider chain can be optional conveniences on supported deployments. Never require an AWS account for installation
 or a non-AWS backup destination. Protect stored credentials, mask them in the UI, and redact them from logs and errors.
 
 Use a small S3 API subset for upload, list, download, and cleanup of failed work; support multipart upload and abort where required by the
-documented backup size limit. Do not depend on AWS-specific IAM APIs, object ACLs, KMS, event notifications, or bucket provisioning in core
+documented backup size limit. Do not depend on AWS-specific IAM APIs, object ACLs, tagging, KMS, event notifications, or bucket provisioning in core
 backup logic. Use application manifests and portable integrity checks rather than assuming an object ETag is a file checksum. Document any
 endpoint-specific limits and optional features separately.
 
@@ -266,7 +290,7 @@ Show backup age and explain that writes after the backup are not recovered.
 | Demo compute | AWS Lightsail Linux instance; generic Linux VPS requirements for installation |
 | Installation | Docker Compose and versioned one-command installer; Ubuntu 24.04 LTS x86-64 |
 | Dashboard HTTPS | Caddy with a host-managed fixed configuration; HTTPS before admin setup |
-| Database TLS | Publicly trusted certificate with explicit issuance, delivery, renewal, and PostgreSQL reload |
+| Database TLS | Caddy-managed certificate with restricted host-managed delivery and PostgreSQL reload |
 | Connection pooling | PgBouncer after the demo; direct connections for the MVP |
 
 ## Hackathon deliverable
@@ -278,8 +302,9 @@ The recording should show the personal problem, simple database creation, an all
 replacement-server recovery, and recognizable recovered records. Show AWS use, backup timestamp, verification results, and measured recovery
 time. Explain one concrete lesson learned and provide an architecture diagram and cost estimate with explicit assumptions.
 
-Prepare the script alongside development and record a usable recovery demo as soon as it works. Reserve roughly the final quarter of the
-available time for deployment checks, fixes, and submission. The final recording must be under three minutes; disclose time compression.
+Prepare the recognizable dataset and script alongside development and record a usable recovery demo as soon as the first AWS recovery works,
+without waiting for the portability checks or dashboard refinement. Reserve roughly the final quarter of the available time for deployment
+checks, fixes, and submission. The final recording must be under three minutes; disclose time compression.
 
 ## Scope boundaries and later work
 
@@ -298,6 +323,8 @@ Before running one low-stakes production application, test retention, backup int
 disk exhaustion, corrupt backups, expired storage access, incompatible restores, and a documented manual update procedure. Review setup-token
 handling, credential storage, TLS, access rules, and actual external exposure. Exercise certificate renewal and credential rotation. Define
 acceptable data loss and recovery time and measure them with the intended workload. This gate is mandatory even if the demo is complete.
+Prioritize retention, alerts, abandoned-work cleanup, manual updates, and runbook-only recovery after the demo; all production checks remain
+required. Phase 2 proves certificate issuance and replacement/delivery/reload; Phase 6 exercises full automatic-renewal failure and retry.
 
 Build versioned metadata migrations, secret encryption, request/subprocess timeouts, bounded temporary storage, and container log rotation
 into the MVP as those components are introduced. The production gate adds operational evidence and controls to the same architecture.
