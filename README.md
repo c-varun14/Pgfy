@@ -6,9 +6,23 @@ The intended MVP lets you install one release on a compatible VPS and configure 
 and storage are independent choices; neither requires an AWS account. The initial portability validation is part of the MVP, with targets
 and pending evidence listed in [the validation document](docs/phase1-validation.md#portability-validation-targets).
 
-The Phase 1 implementation includes a Go application with an embedded React dashboard, SQLite management state, PostgreSQL 18.6, and Caddy. It provides secure initial setup, email/password login, dependency status, read-only settings, a versioned release pipeline, and host-side installation/recovery commands.
+The implementation is a Go application with an embedded React dashboard, SQLite management state, PostgreSQL 18.6, and Caddy.
 
-**Phase 1 deployment acceptance is still pending on Lightsail and a second independent Ubuntu host.** This repository does not yet implement project provisioning, remote database TLS/access policies, backups, or recovery from server loss. It is not production-ready.
+## Implemented
+
+- One-command install with HTTPS-first dashboard access, single-admin setup, sessions, CSRF, rate limits.
+- Projects: one name creates a database, a restricted role and a strong password; resumable provisioning with honest failure states and retry.
+- Connection details with `sslmode=verify-full`, driver snippets, an SSH-tunnel path, and an observed connection check from the application environment.
+- Database TLS with the dashboard certificate delivered to PostgreSQL by `pgfyctl sync-db-cert` (daily timer); per-project allowed-address rules applied and verified through PostgreSQL's own parser and reload; TLS-only remote access; cross-project isolation.
+- Backups to any S3-compatible bucket configured in Settings: storage check, manual and daily backups, manifests published last, durable one-at-a-time jobs that survive browser closure and report restarts as interrupted.
+- Recovery on a fresh install from the bucket alone: checksum, version compatibility, restore into a new project, named verification checks, credential handoff. See the [recovery runbook](docs/recovery-runbook.md).
+
+## Planned, not implemented
+
+- Automated retention/cleanup of old backups (delete them in your bucket), external alerts, automatic certificate-renewal failure handling beyond the daily timer, IPv6 probing, DNS-01 issuance, PgBouncer, a SQL editor, team permissions, one-click updates.
+- The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.
+
+This is a hackathon MVP with production-shaped foundations, not a production-ready service; run the post-demo hardening gate in [the phases document](docs/phases.md) before real workloads.
 
 ## Installation
 
@@ -22,6 +36,8 @@ remain pending. See the installation guide for the copy-paste command and the do
 - [Generic installation and host recovery](docs/installation.md)
 - [Lightsail deployment](docs/lightsail.md)
 - [Test server SSH access and agent handoff](docs/deployment-access.md)
+- [Recovery runbook](docs/recovery-runbook.md)
+- [Demo application](demo/README.md)
 - [Validation evidence and acceptance checklist](docs/phase1-validation.md)
 - [API and security behavior](docs/api.md)
 - [Product brief](docs/idea.md) and [implementation phases](docs/phases.md)
@@ -47,6 +63,8 @@ python3 scripts/e2e-server.py
 ```
 
 Open `http://127.0.0.1:8080`; read the temporary setup token from `.cache/e2e-token` in a second terminal. PostgreSQL intentionally reports unavailable in this browser fixture. Stopping it removes its SQLite database and key. Never bind this development fixture to a public interface.
+
+`PGFY_INTEGRATION_HOLD=300 python3 scripts/integration.py` keeps the integration stack running for five minutes after the checks (credentials in `.cache/integration-hold.json`) so the full dashboard, including projects, backups and recovery against a local S3-compatible store, can be explored at `http://127.0.0.1:8080`.
 
 For frontend hot reload, start `python3 scripts/e2e-server.py --backend-only` and run `pnpm --dir web dev` in another terminal. Vite serves loopback port 8080 and forwards API calls to the disposable backend on loopback port 3000, preserving the configured authentication origin.
 
