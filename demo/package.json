@@ -1,0 +1,14 @@
+{
+  "name": "pgfy-demo-guestbook",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tiny guestbook that reads and writes recognizable rows through a Pgfy project connection.",
+  "scripts": {
+    "write": "node demo.js write",
+    "read": "node demo.js read"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
+}
