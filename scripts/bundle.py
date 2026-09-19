@@ -24,7 +24,7 @@ for name in ("bootstrap.sh", "install.sh", "pgfyctl", "installer.py", "compose.y
         shutil.copytree(source, target / name)
     else:
         shutil.copy2(source, target / name)
-for name in ("installation.md", "lightsail.md", "phase1-validation.md"):
+for name in ("installation.md", "lightsail.md", "phase1-validation.md", "recovery-runbook.md"):
     shutil.copy2(root / "docs" / name, target / name)
 images = json.loads((root / "deploy/images.lock.json").read_text())
 release = {"version": args.version, "images": {"application": args.image, "postgres": images["postgres"], "caddy": images["caddy"]}, "docker_packages": {"docker-ce": "5:29.8.0-1~ubuntu.24.04~noble", "docker-ce-cli": "5:29.8.0-1~ubuntu.24.04~noble", "containerd.io": "2.3.5-1~ubuntu.24.04~noble", "docker-compose-plugin": "5.5.1-1~ubuntu.24.04~noble"}}

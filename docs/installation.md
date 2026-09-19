@@ -91,7 +91,10 @@ sudo /opt/firstcommit/pgfyctl setup-token
 sudo /opt/firstcommit/pgfyctl hostname new-admin.example.com
 sudo /opt/firstcommit/pgfyctl rollback-hostname
 sudo /opt/firstcommit/pgfyctl tunnel
+sudo /opt/firstcommit/pgfyctl sync-db-cert
 ```
+
+`sync-db-cert` copies the certificate Caddy obtained for the dashboard hostname into PostgreSQL (validated, key permissions fixed, previous pair kept), reloads, and confirms a new TLS handshake presents it. The installer runs it once and installs a daily `pgfy-cert.timer` for renewals. Until it has succeeded, PostgreSQL serves a self-signed placeholder and the dashboard says so.
 
 Token replacement works only before administrator creation and after the previous token expires. Losing an unexpired token requires waiting for expiry. Installer reruns never issue a replacement automatically. There is no public registration-reopening or password-reset endpoint.
 
@@ -110,14 +113,17 @@ The installation contains:
 | Location | Purpose |
 | --- | --- |
 | `state.json` | Installed release, image digests, persistent volume identities |
-| `config/` | Host-managed dashboard origin, Caddy configuration, PostgreSQL access policy |
-| `data/sqlite/` | Administrator, hashed sessions/setup tokens, management metadata |
+| `config/` | Host-managed dashboard origin, Caddy configuration, PostgreSQL access policy (`pg/pg_hba.conf`), database TLS material (`postgres-tls/`) |
+| `config/pg/managed/` | Dashboard-written project access rules (`projects.conf`), included by the host policy; the only PostgreSQL configuration the app can write |
+| `data/sqlite/` | Administrator, hashed sessions/setup tokens, projects, sealed credentials, jobs, sealed storage settings |
+| `data/work/` | Disk-backed workspace for backup/restore archives; emptied at application start |
 | `secrets/encryption_key` | Recoverable-secret encryption key, separately protected from SQLite |
 | `secrets/bootstrap_password` | PostgreSQL bootstrap credential, never mounted into the app |
 | `secrets/health_password` | Restricted PostgreSQL health-query credential |
+| `secrets/management_password` | Non-superuser provisioning credential (`pgfy_mgmt`) used by the dashboard |
 | `releases/` | Verified installed bundle and host command implementation |
 
-Secret files use fixed container identities: bootstrap password owner/group `999:999`, mode `0400`; health password `10001:999`, mode `0440`; encryption key `10001:10001`, mode `0400`. The SQLite directory belongs to `10001:10001`, mode `0700`. Reruns reject unexpected secret ownership/permissions instead of rewriting them.
+Secret files use fixed container identities: bootstrap password owner/group `999:999`, mode `0400`; health and management passwords `10001:999`, mode `0440`; encryption key `10001:10001`, mode `0400`. The SQLite directory belongs to `10001:10001`, mode `0700`. Reruns reject unexpected secret ownership/permissions instead of rewriting them.
 
 The app creates no fresh SQLite database during normal startup. Missing metadata fails closed. Do not replace missing SQLite/key files with empty ones or regenerate secrets beside existing data. A metadata/key backup must preserve their association. Phase 1 does not supply a disaster-recovery solution.
 
@@ -132,8 +138,22 @@ The app creates no fresh SQLite database during normal startup. Missing metadata
 
 Diagnostics print safe state, not raw credentials or container logs. Operators can inspect restricted logs through Docker on the host. Do not share unreviewed logs or the installation's secret files.
 
+## Database access
+
+Applications connect to PostgreSQL at the dashboard hostname on port 5432 with TLS (`sslmode=verify-full`, using the same publicly trusted certificate as the dashboard). In HTTPS mode the installer publishes 5432 on all interfaces; **open TCP 5432 in your provider firewall** to allow application traffic. Both layers must allow a connection: the provider firewall and the per-project allowlist in the dashboard. Remember that your application's server has its own outbound IP, which usually differs from the address you browse from.
+
+In tunnel mode PostgreSQL is published on the host loopback only. Developers forward it from their computer and connect to `127.0.0.1:5432`:
+
+```sh
+ssh -N -L 5432:127.0.0.1:5432 user@server
+```
+
+Loopback-forwarded connections are admitted per project without a public port; the certificate cannot be verified through the tunnel, so the dashboard shows a `sslmode=require` URL there.
+
+If the DNS record for the hostname is proxied through a CDN (for example Cloudflare's orange cloud), PostgreSQL connections will not pass through it: use a DNS-only record for the database hostname.
+
 ## Network boundary
 
-The application and PostgreSQL publish no host ports. Caddy alone publishes 80/443 in HTTPS mode or loopback 8080 in tunnel mode. The database network is internal and separate from the proxy network. Caddy admin is disabled. Host administrators remain trusted and can inspect Docker networks and volumes.
+The application publishes no host ports. Caddy publishes 80/443 in HTTPS mode or loopback 8080 in tunnel mode; PostgreSQL publishes 5432 on all interfaces in HTTPS mode or loopback only in tunnel mode. The database network shared with the application is internal; PostgreSQL additionally joins a dedicated network used only for the published port. Caddy admin is disabled. Host administrators remain trusted and can inspect Docker networks and volumes.
 
-Verify from a separate public client and private-network peer that 5432, 3000, 2019, 8080, and 8081 are inaccessible. Test IPv6 when enabled. Docker port publishing can bypass assumptions about UFW; inspect and probe actual behavior rather than treating a firewall screenshot as proof.
+Verify from a separate public client and private-network peer that 3000, 2019, 8080, and 8081 are inaccessible, that 5432 rejects non-TLS and unlisted sources, and that a project role cannot open another project's database. Test IPv6 when enabled. Docker port publishing can bypass assumptions about UFW; inspect and probe actual behavior rather than treating a firewall screenshot as proof.
