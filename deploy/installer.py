@@ -111,7 +111,7 @@ http://127.0.0.1:8081 {
         header_up X-Forwarded-For {{remote_host}}
         transport http {{
             dial_timeout 3s
-            response_header_timeout 15s
+            response_header_timeout 75s
         }}
     }}
 }}
@@ -119,15 +119,39 @@ http://127.0.0.1:8081 {
 
 def pg_hba(subnet):
     ipaddress.ip_network(subnet)
-    return f"""# Host-managed. No public database access in Phase 1.
+    # First match wins: system roles are pinned (and rejected elsewhere) before the
+    # dashboard-managed include, so that file can only ever admit project roles.
+    return f"""# Host-managed. Do not edit; project rules live in managed/projects.conf.
 local all pgfy_bootstrap scram-sha-256
 host pgfy_system pgfy_health 127.0.0.1/32 scram-sha-256
-host pgfy_system pgfy_health ::1/128 scram-sha-256
 host pgfy_system pgfy_health {subnet} scram-sha-256
+host all pgfy_mgmt {subnet} scram-sha-256
+host all pgfy_bootstrap all reject
+host all pgfy_health all reject
+host all pgfy_mgmt all reject
+include_if_exists managed/projects.conf
 local all all reject
 host all all 0.0.0.0/0 reject
 host all all ::/0 reject
 """
+
+def placeholder_certificate(directory):
+    """Self-signed placeholder so PostgreSQL always starts with TLS; sync-db-cert replaces it."""
+    directory = Path(directory)
+    if (directory / "server.crt").exists() and (directory / "server.key").exists():
+        return
+    with tempfile.TemporaryDirectory(dir=directory.parent) as work:
+        work = Path(work)
+        run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "3650", "-subj", "/CN=pgfy-placeholder", "-keyout", work / "server.key", "-out", work / "server.crt"], timeout=30)
+        atomic(directory / "server.key", (work / "server.key").read_bytes(), 0o600, 999, 999)
+        atomic(directory / "server.crt", (work / "server.crt").read_bytes(), 0o644, 999, 999)
+    json_write(directory / "state.json", {"state": "placeholder", "source": "self-signed", "issuer": "", "not_after": "", "fingerprint": ""}, 0o644)
+
+def compose_env(root, state, cfg):
+    # Loopback-published connections (the SSH-tunnel path) arrive from the Docker gateway only.
+    tunnel_source = str(ipaddress.ip_network(state["public_subnet"])[1]) + "/32"
+    values = {"INSTALL_DIR": str(root), "APP_IMAGE": state["images"]["application"], "POSTGRES_IMAGE": state["images"]["postgres"], "CADDY_IMAGE": state["images"]["caddy"], "VOLUME_PREFIX": state["volume_prefix"], "DATABASE_SUBNET": state["database_subnet"], "PROXY_SUBNET": state["proxy_subnet"], "PUBLIC_SUBNET": state["public_subnet"], "TUNNEL_SOURCE": tunnel_source, "PG_BIND": "0.0.0.0" if cfg["mode"] == "https" else "127.0.0.1"}
+    return "\n".join(f"{k}={v}" for k, v in values.items()) + "\n"
 
 def verify_bundle(bundle):
     manifest = bundle / "SHA256SUMS"
@@ -213,6 +237,8 @@ def available_ports(mode):
             if family == socket.AF_INET6 and not ipv6_enabled():
                 continue
             with socket.socket(family, socket.SOCK_STREAM) as listener:
+                # Lingering TIME-WAIT sockets from an earlier run are not an occupied port.
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
                     if family == socket.AF_INET6:
                         listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
@@ -235,15 +261,15 @@ def select_subnets():
             occupied.append(ipaddress.ip_network(route["dst"], strict=False))
     candidates = [ipaddress.ip_network(f"172.{second}.{third}.0/24") for second in range(20, 32) for third in range(240, 254)]
     free = [n for n in candidates if not any(n.version == used.version and n.overlaps(used) for used in occupied)]
-    if len(free) < 2:
-        raise InstallError("Cannot find two unused private Docker subnets. Review host routing.")
-    return str(free[0]), str(free[1])
+    if len(free) < 3:
+        raise InstallError("Cannot find three unused private Docker subnets. Review host routing.")
+    return str(free[0]), str(free[1]), str(free[2])
 
 def preflight(root, release, hostname, mode, existing):
     info = platform.freedesktop_os_release()
     if info.get("ID") != "ubuntu" or info.get("VERSION_ID") != "24.04" or platform.machine() != "x86_64":
         raise InstallError("Supported target: Ubuntu 24.04 LTS on x86-64.")
-    for command in ("ip", "curl", "findmnt"):
+    for command in ("ip", "curl", "findmnt", "openssl"):
         if not shutil.which(command):
             raise InstallError(f"Missing prerequisite: {command}.")
     ancestor = root
@@ -357,10 +383,10 @@ def install(args):
             raise InstallError("Installation directory is nonempty without installation state. Inspect it manually; nothing was overwritten.")
     engine, compose_version = preflight(root, release, hostname, mode, existing)
     if not existing:
-        database_subnet, proxy_subnet = select_subnets()
+        database_subnet, proxy_subnet, public_subnet = select_subnets()
         root.mkdir(parents=True, mode=0o711, exist_ok=True)
         installation_id = uuid.uuid4().hex
-        state = {"release": release["version"], "images": release["images"], "id": installation_id, "volume_prefix": "pgfy_" + installation_id[:12], "database_subnet": database_subnet, "proxy_subnet": proxy_subnet, "stage": "preparing"}
+        state = {"release": release["version"], "images": release["images"], "id": installation_id, "volume_prefix": "pgfy_" + installation_id[:12], "database_subnet": database_subnet, "proxy_subnet": proxy_subnet, "public_subnet": public_subnet, "stage": "preparing"}
         # Stage configuration/state together before any data or secrets exist.
         cfg = {"id": installation_id, "mode": mode, "hostname": hostname, "origin": "https://" + hostname if hostname else "http://127.0.0.1:8080", "generation": uuid.uuid4().hex, "release": release["version"], "caddy_version": "pending", "docker_version": engine, "compose_version": compose_version}
         (root / "config/caddy").mkdir(parents=True, mode=0o755)
@@ -387,6 +413,16 @@ def install(args):
     (root / "secrets").mkdir(mode=0o711, exist_ok=True)
     (root / "data/sqlite").mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chown(root / "data/sqlite", 10001, 10001)
+    # Disk-backed workspace for dump/restore archives; /tmp inside the container is a small tmpfs.
+    (root / "data/work").mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chown(root / "data/work", 10001, 10001)
+    if (root / "config/pg_hba.conf").exists():
+        raise InstallError("This installation uses the pre-release Phase 1 layout, which cannot be upgraded in place. Back up any data, remove the installation, and install fresh.")
+    (root / "config/pg").mkdir(parents=True, mode=0o755, exist_ok=True)
+    # The dashboard owns only this directory: it may admit project roles, nothing else.
+    (root / "config/pg/managed").mkdir(mode=0o750, exist_ok=True)
+    os.chown(root / "config/pg/managed", 10001, 999)
+    (root / "config/postgres-tls").mkdir(parents=True, mode=0o755, exist_ok=True)
     images = state["images"]
     for image in images.values():
         result = run(["docker", "pull", "--platform", "linux/amd64", image], timeout=600, check=False)
@@ -397,7 +433,7 @@ def install(args):
         raise InstallError("Partial or foreign PostgreSQL initialization detected. Stop and inspect the existing volume; do not regenerate credentials or rerun initialization scripts blindly.")
     if data_state == "empty" and state["stage"] != "preparing":
         raise InstallError("Previously initialized PostgreSQL storage is missing. Restore the original volume; the installer will not silently replace it.")
-    secret_specs = {"bootstrap_password": (secrets.token_hex(32).encode(), 999, 999, 0o400), "health_password": (secrets.token_hex(32).encode(), 10001, 999, 0o440), "encryption_key": (secrets.token_bytes(32), 10001, 10001, 0o400)}
+    secret_specs = {"bootstrap_password": (secrets.token_hex(32).encode(), 999, 999, 0o400), "health_password": (secrets.token_hex(32).encode(), 10001, 999, 0o440), "management_password": (secrets.token_hex(32).encode(), 10001, 999, 0o440), "encryption_key": (secrets.token_bytes(32), 10001, 10001, 0o400)}
     for name, (value, uid, gid, permissions) in secret_specs.items():
         path = root / "secrets" / name
         if not path.exists():
@@ -410,9 +446,9 @@ def install(args):
                 raise InstallError(f"Secret {name} has unexpected ownership or permissions; restore the documented restricted host permissions.")
     generated = {
         root / "config/installation-id": state["id"] + "\n",
-        root / "config/pg_hba.conf": pg_hba(state["database_subnet"]),
+        root / "config/pg/pg_hba.conf": pg_hba(state["database_subnet"]),
         root / "config/caddy/Caddyfile": caddyfile(cfg),
-        root / "compose.env": "\n".join(f"{k}={v}" for k, v in {"INSTALL_DIR": str(root), "APP_IMAGE": images["application"], "POSTGRES_IMAGE": images["postgres"], "CADDY_IMAGE": images["caddy"], "VOLUME_PREFIX": state["volume_prefix"], "DATABASE_SUBNET": state["database_subnet"], "PROXY_SUBNET": state["proxy_subnet"]}.items()) + "\n",
+        root / "compose.env": compose_env(root, state, cfg),
     }
     for path, content in generated.items():
         if not path.exists():
@@ -421,6 +457,7 @@ def install(args):
             atomic(path, content, 0o600 if path.name == "compose.env" else 0o644)
         elif path.name in ("compose.env", "installation-id") and path.read_text() != content:
             raise InstallError(f"{path.name} no longer matches persisted installation/release/volume identity. Restore the original configuration; no services were changed.")
+    placeholder_certificate(root / "config/postgres-tls")
     installation.compose("config", "--quiet")
     installation.validate_caddy()
     sqlite_path = root / "data/sqlite/pgfy.db"
@@ -442,6 +479,11 @@ def install(args):
     print(f"Installation verified: {cfg['origin']}")
     if mode == "tunnel":
         print("Restricted access: loopback only. From your computer: ssh -L 8080:127.0.0.1:8080 user@server")
+        print("PostgreSQL listens on 127.0.0.1:5432 only. Use ssh -L 5432:127.0.0.1:5432 user@server.")
+    else:
+        sync_db_cert(installation, fatal=False)
+        install_cert_timer(root)
+        print(f"Direct database access: {hostname}:5432 over TLS. Open TCP 5432 in your provider firewall to allow application connections.")
     if not existing:
         # Token command emits plaintext only to this terminal, never container logs.
         token = installation.compose("exec", "-T", "application", "pgfy", "setup-token", check=False)
@@ -473,18 +515,94 @@ def change_access(installation, mode, hostname="", rollback=False):
         if rollback:
             atomic(root / "config/caddy/Caddyfile", saved["caddyfile"], 0o644)
         installation.validate_caddy()
-        installation.compose("up", "-d", "--force-recreate", "application", "caddy", timeout=120)
+        # PG_BIND follows the access mode: public 5432 only alongside public HTTPS.
+        atomic(root / "compose.env", compose_env(root, installation.state, new), 0o600)
+        installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=120)
         # Host recovery must remain usable during a PostgreSQL or SQLite outage.
         installation.verify(require_dependencies=False)
     except (InstallError, KeyboardInterrupt):
         old["generation"] = uuid.uuid4().hex
         json_write(root / "config/install.json", old, 0o644)
         atomic(root / "config/caddy/Caddyfile", saved_caddy, 0o644)
-        installation.compose("up", "-d", "--force-recreate", "application", "caddy", timeout=120, check=False)
+        atomic(root / "compose.env", compose_env(root, installation.state, old), 0o600)
+        installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=120, check=False)
         raise InstallError("Access change failed; previous configuration restored. Sign in again. If the host was interrupted, run pgfyctl rollback-hostname.")
     print(f"Access verified: {new['origin']}. Previous sessions are invalid; sign in again.")
     if new["mode"] == "tunnel":
         print("Loopback access only. Use ssh -L 8080:127.0.0.1:8080 user@server.")
+        print("PostgreSQL listens on 127.0.0.1:5432 only. Use ssh -L 5432:127.0.0.1:5432 user@server.")
+    else:
+        print("PostgreSQL accepts TLS connections on port 5432. Open TCP 5432 in your provider firewall.")
+        sync_db_cert(installation, fatal=False)
+
+def certificate_fingerprint(path):
+    out = run(["openssl", "x509", "-in", path, "-noout", "-fingerprint", "-sha256"]).stdout
+    return out.strip().split("=", 1)[1]
+
+def sync_db_cert(installation, fatal=True):
+    """Deliver Caddy's certificate for the dashboard hostname to PostgreSQL. Caddy issues and
+    renews; this copies, validates, reloads, and confirms a new connection sees the change."""
+    root = installation.root
+    cfg = installation.config()
+    tls = root / "config/postgres-tls"
+    try:
+        if cfg["mode"] != "https":
+            raise InstallError("Direct database TLS uses the dashboard hostname; the installation is in tunnel mode.")
+        host = cfg["hostname"]
+        listing = installation.compose("exec", "-T", "caddy", "sh", "-c", f"ls /data/caddy/certificates/*/{host}/{host}.crt 2>/dev/null | head -n 1", check=False)
+        crt_path = listing.stdout.strip()
+        if listing.returncode or not crt_path:
+            raise InstallError("Caddy has not obtained a certificate for the dashboard hostname yet. Check DNS and inbound 80/443, then rerun pgfyctl sync-db-cert.")
+        certificate = installation.compose("exec", "-T", "caddy", "cat", crt_path).stdout
+        key = installation.compose("exec", "-T", "caddy", "cat", crt_path[:-4] + ".key").stdout
+        with tempfile.TemporaryDirectory(dir=tls) as work:
+            work = Path(work)
+            atomic(work / "server.crt", certificate, 0o600)
+            atomic(work / "server.key", key, 0o600)
+            run(["openssl", "x509", "-in", work / "server.crt", "-noout", "-checkhost", host, "-checkend", "86400"])
+            run(["openssl", "verify", "-untrusted", work / "server.crt", work / "server.crt"])
+            public_from_cert = run(["openssl", "x509", "-in", work / "server.crt", "-noout", "-pubkey"]).stdout
+            public_from_key = run(["openssl", "pkey", "-in", work / "server.key", "-pubout"]).stdout
+            if public_from_cert.strip() != public_from_key.strip():
+                raise InstallError("Certificate and key from Caddy do not match; nothing was changed.")
+            fingerprint = certificate_fingerprint(work / "server.crt")
+            details = run(["openssl", "x509", "-in", work / "server.crt", "-noout", "-issuer", "-enddate", "-nameopt", "RFC2253"]).stdout.splitlines()
+            issuer = next((line.split("=", 1)[1] for line in details if line.startswith("issuer=")), "")
+            not_after = next((line.split("=", 1)[1] for line in details if line.startswith("notAfter=")), "")
+            previous = {name: (tls / name).read_bytes() for name in ("server.crt", "server.key") if (tls / name).exists()}
+            if previous and certificate_fingerprint(tls / "server.crt") == fingerprint:
+                print("PostgreSQL already serves the current certificate.")
+                return
+            for name, content in previous.items():
+                atomic(tls / (name + ".previous"), content, 0o600, 999, 999)
+            atomic(tls / "server.key", key, 0o600, 999, 999)
+            atomic(tls / "server.crt", certificate, 0o644, 999, 999)
+        def reload_and_observe():
+            installation.compose("exec", "-T", "-u", "postgres", "postgres", "pg_ctl", "reload")
+            time.sleep(1)
+            observed = run(["sh", "-c", "openssl s_client -starttls postgres -connect 127.0.0.1:5432 -servername " + host + " </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256"], check=False).stdout
+            return observed.strip().split("=", 1)[-1]
+        if reload_and_observe() != fingerprint:
+            for name, content in previous.items():
+                atomic(tls / name, content, 0o600 if name.endswith(".key") else 0o644, 999, 999)
+            reload_and_observe()
+            raise InstallError("PostgreSQL did not present the new certificate after reload; the previous certificate was restored.")
+        json_write(tls / "state.json", {"state": "trusted", "source": "caddy", "hostname": host, "issuer": issuer, "not_after": not_after, "fingerprint": fingerprint, "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, 0o644)
+        print(f"PostgreSQL now serves the certificate for {host} (expires {not_after}).")
+    except InstallError as error:
+        if fatal:
+            raise
+        print(f"Database certificate not synced yet: {error} The self-signed placeholder remains; clients cannot verify it until sync succeeds.")
+
+def install_cert_timer(root):
+    units = {
+        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nExecStart={root}/pgfyctl sync-db-cert\n",
+        "/etc/systemd/system/pgfy-cert.timer": "[Unit]\nDescription=Daily Pgfy database certificate sync\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
+    }
+    for path, content in units.items():
+        atomic(path, content, 0o644)
+    run(["systemctl", "daemon-reload"], check=False)
+    run(["systemctl", "enable", "--now", "pgfy-cert.timer"], check=False)
 
 def diagnostics(installation):
     cfg = installation.config()
@@ -520,6 +638,7 @@ def main():
     hostname_parser.add_argument("hostname")
     sub.add_parser("tunnel")
     sub.add_parser("rollback-hostname")
+    sub.add_parser("sync-db-cert")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.exit(1, "Host administration requires root; run this command with sudo.\n")
@@ -540,6 +659,8 @@ def main():
                     change_access(installation, "https", args.hostname)
                 elif args.command == "tunnel":
                     change_access(installation, "tunnel")
+                elif args.command == "sync-db-cert":
+                    sync_db_cert(installation)
                 else:
                     change_access(installation, "", rollback=True)
     except (InstallError, OSError, ValueError, KeyError) as error:

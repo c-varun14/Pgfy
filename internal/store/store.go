@@ -232,6 +232,7 @@ type Session struct {
 	Email     string `json:"email"`
 	ExpiresAt int64  `json:"expires_at"`
 	CSRF      string `json:"csrf_token"`
+	ClientIP  string `json:"client_ip,omitempty"`
 }
 
 func (s *Store) Session(ctx context.Context, token, scope string, now time.Time) (Session, error) {

@@ -17,8 +17,11 @@ import (
 	"time"
 
 	"github.com/c-varun14/Pgfy/internal/config"
+	"github.com/c-varun14/Pgfy/internal/hba"
 	"github.com/c-varun14/Pgfy/internal/httpapi"
+	"github.com/c-varun14/Pgfy/internal/jobs"
 	"github.com/c-varun14/Pgfy/internal/postgres"
+	"github.com/c-varun14/Pgfy/internal/provision"
 	"github.com/c-varun14/Pgfy/internal/security"
 	"github.com/c-varun14/Pgfy/internal/store"
 	"github.com/c-varun14/Pgfy/web"
@@ -129,6 +132,20 @@ func run() error {
 	} else {
 		defer pg.Pool.Close()
 	}
+	var mgmt *postgres.Management
+	var provisioner *provision.Provisioner
+	var worker *jobs.Worker
+	if s != nil {
+		mgmt, e = postgres.OpenManagement(context.Background(), config.Env("PGFY_MANAGEMENT_PASSWORD_FILE", "/run/secrets/management_password"))
+		if e != nil {
+			slog.Error("postgres management configuration unavailable; project provisioning disabled")
+		} else {
+			defer mgmt.Pool.Close()
+			policy := &hba.Manager{Dir: config.Env("PGFY_HBA_DIR", "/etc/pgfy/pg/managed"), TunnelSource: os.Getenv("PGFY_TUNNEL_SOURCE"), PG: mgmt}
+			provisioner = provision.New(s, vault, mgmt, policy)
+			worker = jobs.New(s, vault, mgmt, provisioner, cfg.ID, config.Env("PGFY_WORKSPACE", "/work"))
+		}
+	}
 	versions := map[string]string{"application": version, "commit": commit, "go": runtime.Version()}
 	for _, tool := range []string{"psql", "pg_dump", "pg_restore"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -147,10 +164,14 @@ func run() error {
 			return errors.New("invalid trusted proxy CIDR")
 		}
 	}
-	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy}
-	srv := http.Server{Addr: config.Env("PGFY_LISTEN", ":3000"), Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
+	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json")}
+	srv := http.Server{Addr: config.Env("PGFY_LISTEN", ":3000"), Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if provisioner != nil {
+		go provisioner.Run(ctx)
+		go worker.Run(ctx)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
