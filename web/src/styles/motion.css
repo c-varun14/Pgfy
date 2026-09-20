@@ -6,8 +6,13 @@
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
 @keyframes soft-pulse { 50% { box-shadow: 0 0 0 5px var(--good-soft); } }
+@keyframes auth-reveal { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes auth-float { 0%,100% { transform: rotate(-8deg) translateY(0); } 50% { transform: rotate(-5deg) translateY(-8px); } }
 .page-enter { animation: enter 0.18s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-html, .card, .sidebar, .sidebar-bottom, .database-table, .code-block, .dialog-panel { transition: background-color 0.25s, border-color 0.25s, color 0.25s; }
+html, .card, .sidebar, .sidebar-bottom, .project-card, .backup-card, .code-block, .dialog-panel { transition: background-color 0.25s, border-color 0.25s, color 0.25s; }
 .pop { animation: pop 0.25s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .button[data-copied] { color: var(--good); }
+.auth-pitch { animation: auth-reveal .7s cubic-bezier(.2,.8,.2,1) both; }
+.auth-card { animation: auth-reveal .7s .08s cubic-bezier(.2,.8,.2,1) both; }
+.auth-orbit > span { animation: auth-float 6s ease-in-out infinite; }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; } }

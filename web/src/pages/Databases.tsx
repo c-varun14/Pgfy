@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { ChevronRight, Database, Plus, TriangleAlert } from "lucide-react";
+import { ArrowRight, Database, Plus, TriangleAlert } from "lucide-react";
 import { api, type Manifest, type Project, type Status, type StorageSettings } from "../api";
 import { formatBytes, formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
@@ -56,11 +56,18 @@ export function DatabasesPage({ status, navigate }: { status: Status | null; nav
     {status && !status.ready && <Banner tone="warn"><TriangleAlert size={18} /><div><h2>Your server needs attention</h2><p>PostgreSQL isn't responding. Run <code>pgfyctl diagnostics</code> on the server.</p></div></Banner>}
     {projects && projects.length > 0 && storageConfigured === false && <Banner><span>Backups are off — your databases aren't protected against server loss. <button className="link" onClick={() => navigate("/backups")}>Set up backups →</button></span></Banner>}
     {error && <ErrorNotice message={error} />}
-    {projects === null ? !error && <div className="database-table"><Skeleton lines={3} className="skeleton-row" /></div> : projects.length === 0 ? <EmptyState icon={<EmptyArt />} title="No databases yet" action={<Button onClick={() => setCreating(true)}><Plus size={16} />New database</Button>}>Create your first database. It will be ready in a few seconds.</EmptyState> :
-      <div className="database-table" role="table" aria-label="Databases">
-        <div className="database-row database-head" role="row"><span>Name</span><span>Status</span><span className="num">Size</span><span>Last backup</span><span className="num">Connections</span><span>Created</span><span /></div>
-        {projects.map((project) => { const stage = databaseStage(project); const backup = latest.get(project.id); const connections = project.connections_now?.length || 0; return <button type="button" className="database-row" role="row" key={project.id} onClick={() => navigate(`/projects/${project.id}`)}>
-          <strong role="cell"><Database size={16} />{project.name}</strong><span role="cell"><Pill tone={stage.tone}>{stage.label}</Pill></span><span role="cell" className="num" data-label="Size">{project.stage === "ready" ? formatBytes(project.size_bytes) : "—"}</span><span role="cell" data-label="Last backup">{storageConfigured === false ? "Off" : manifests === null ? "—" : backup ? <time title={formatDate(Date.parse(backup.created_at) / 1000)}>{relativeTime(Date.parse(backup.created_at) / 1000)}</time> : "Never"}</span><span role="cell" className="num" data-label="Connections">{connections ? `${connections} live` : "—"}</span><span role="cell" data-label="Created"><time title={formatDate(project.created_at)}>{relativeTime(project.created_at)}</time></span><ChevronRight size={16} aria-hidden="true" />
+    {projects === null ? !error && <Skeleton lines={3} className="skeleton-cards" /> : projects.length === 0 ? <EmptyState icon={<EmptyArt />} title="No databases yet" action={<Button onClick={() => setCreating(true)}><Plus size={16} />New database</Button>}>Create your first database. It will be ready in a few seconds.</EmptyState> :
+      <div className="project-grid" role="list" aria-label="Databases">
+        {projects.map((project) => { const stage = databaseStage(project); const backup = latest.get(project.id); const connections = project.connections_now?.length || 0; return <button type="button" role="listitem" className="project-card" key={project.id} onClick={() => navigate(`/projects/${project.id}`)}>
+          <div className="project-card-top"><span className="section-icon"><Database size={20} /></span><Pill tone={stage.tone}>{stage.label}</Pill></div>
+          <h2>{project.name}</h2>
+          <p className="mono">{project.db_name}</p>
+          <dl className="project-card-stats">
+            <div><dt>Size</dt><dd>{project.stage === "ready" ? formatBytes(project.size_bytes) : "—"}</dd></div>
+            <div><dt>Last backup</dt><dd>{storageConfigured === false ? "Off" : manifests === null ? "—" : backup ? <time title={formatDate(Date.parse(backup.created_at) / 1000)}>{relativeTime(Date.parse(backup.created_at) / 1000)}</time> : "Never"}</dd></div>
+            <div><dt>Connections</dt><dd>{connections ? `${connections} live` : "—"}</dd></div>
+          </dl>
+          <div className="project-card-meta"><span>Created <time title={formatDate(project.created_at)}>{relativeTime(project.created_at)}</time></span><ArrowRight size={15} aria-hidden="true" /></div>
         </button>; })}
       </div>}
     <Dialog open={creating} onClose={() => setCreating(false)} title="New database">

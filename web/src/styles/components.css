@@ -88,3 +88,13 @@ details { margin-top:14px; } summary { color:var(--text-muted); font-size:13px; 
 .skeleton span { height: 44px; border-radius: 8px; background: linear-gradient(90deg, var(--surface) 25%, var(--surface-raised) 50%, var(--surface) 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; }.skeleton-row span { height: 56px; }
 .empty-state, .empty { padding: 56px 24px; border: 1px dashed var(--border-strong); border-radius: 12px; display: grid; justify-items: center; gap: 6px; text-align: center; background: var(--surface); }.empty-state p { max-width: 440px; margin: 0 0 14px; }.empty-art { position: relative; width: 120px; height: 72px; margin-bottom: 10px; }.empty-art i { position: absolute; left: 50%; width: 88px; height: 44px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-raised); transform: translateX(-50%); }.empty-art i:nth-child(1) { top: 0; opacity: 0.35; scale: 0.8; }.empty-art i:nth-child(2) { top: 12px; opacity: 0.6; scale: 0.9; }.empty-art i:nth-child(3) { top: 24px; box-shadow: var(--shadow-sm); }.empty-art .brand-mark { position: absolute; left: 50%; top: 35px; transform: translate(-50%, -50%); }
 .details > div, .details-list > div { min-height: 44px; padding: 8px 0; }.details dt, .details-list dt { font-size: 12.5px; }.details dd, .details-list dd { font-size: 13.5px; }.banner { border-radius: 10px; padding: 12px 14px; }.banner svg { flex: 0 0 auto; margin-top: 1px; }.banner-warn { color: var(--text); }.banner-warn svg { color: var(--warn); }.button kbd { margin-left: 4px; padding: 1px 5px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); border-radius: 4px; font: 600 10.5px "JetBrains Mono Variable", monospace; opacity: .8; }
+summary { width: max-content; max-width: 100%; padding: 2px 6px; margin-left: -6px; border-radius: 6px; }
+summary:focus:not(:focus-visible) { outline: none; }
+.details > div:last-child, .details-list > div:last-child { border-bottom: 0; }
+.details dd a, .details-list dd a { display: inline-flex; align-items: center; gap: 5px; }
+.secret-input { position: relative; }
+.secret-input > input { padding-right: 42px; }
+.secret-input-icon > input { padding-left: 38px; }
+.secret-input > svg { position: absolute; z-index: 1; left: 13px; top: 50%; transform: translateY(-50%); color: var(--text-faint); pointer-events: none; }
+.secret-input > button { position: absolute; right: 7px; top: 50%; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 7px; display: grid; place-items: center; background: transparent; color: var(--text-faint); transform: translateY(-50%); }
+.secret-input > button:hover { background: var(--surface-raised); color: var(--text); }
