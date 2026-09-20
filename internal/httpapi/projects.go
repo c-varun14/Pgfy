@@ -207,8 +207,19 @@ func (s *Server) projectCredentials(r *http.Request, p store.Project) (connectio
 		c.SSLMode = "require"
 	}
 	c.URL = fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s", url.PathEscape(c.User), url.PathEscape(c.Password), c.Host, c.Port, c.Database, c.SSLMode)
-	c.Psql = fmt.Sprintf("psql %q", c.URL)
+	c.Psql = fmt.Sprintf("psql %q", c.libpqURL())
 	return c, nil
+}
+
+// libpqURL adds sslrootcert=system for libpq-based clients (psql, psycopg, Ruby),
+// which otherwise look for ~/.postgresql/root.crt under verify-full. Drivers such
+// as node-postgres, pgx and JDBC use the system store on their own and would
+// misread the parameter as a file path, so the plain URL stays driver-neutral.
+func (c connectionDetails) libpqURL() string {
+	if c.SSLMode == "verify-full" {
+		return c.URL + "&sslrootcert=system"
+	}
+	return c.URL
 }
 
 func (s *Server) getCredentials(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +306,7 @@ func (s *Server) createConnectionCheck(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metadata_unavailable", "Connection check could not be saved.")
 		return
 	}
-	command := fmt.Sprintf("psql %q -c \"select pg_sleep(20)\"", c.URL+"&application_name="+applicationName)
+	command := fmt.Sprintf("psql %q -c \"select pg_sleep(20)\"", c.libpqURL()+"&application_name="+applicationName)
 	write(w, 201, map[string]any{"id": id, "expires_at": s.Now().Add(10 * time.Minute).Unix(), "application_name": applicationName, "command": command})
 }
 
