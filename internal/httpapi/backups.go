@@ -245,7 +245,7 @@ func (s *Server) startRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validProjectName(in.Name) {
-		failure(w, 400, "invalid_name", "Use 1–64 letters, digits, spaces, dots, dashes, or underscores.")
+		failure(w, 400, "invalid_name", "Use 1–64 letters, digits, spaces, dots, dashes, underscores, or parentheses.")
 		return
 	}
 	client, e := s.Jobs.StorageClient(r.Context())

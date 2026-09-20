@@ -36,7 +36,7 @@ func TestProjectRoutesRequireAuthAndProvisioning(t *testing.T) {
 }
 
 func TestProjectNameValidation(t *testing.T) {
-	for _, ok := range []string{"Shop", "my-app_1.0", "Café orders"} {
+	for _, ok := range []string{"Shop", "my-app_1.0", "Café orders", "Shop (recovered)"} {
 		if !validProjectName(ok) {
 			t.Fatal("rejected", ok)
 		}
