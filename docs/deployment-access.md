@@ -4,11 +4,11 @@ This is the operator handoff for the existing Lightsail test server. Read this a
 
 ## Server identity
 
-These infrastructure details were verified on **2026-09-18**. Recheck live state before deploying or recording acceptance results.
+These infrastructure details were verified on **2026-09-20**, after the host was rebuilt from a fresh Ubuntu 24.04 image for release v0.3.0 (the static IP and DNS name were kept; the SSH host key changed). Recheck live state before deploying or recording acceptance results.
 
 | Item | Value |
 | --- | --- |
-| Instance | `firstcommit-phase1` |
+| Instance | `pgfy-a` (formerly `firstcommit-phase1`; the `firstcommit-recovery` instance was deleted) |
 | AWS region / availability zone | `us-east-1` / `us-east-1a` |
 | OS / architecture | Ubuntu 24.04 LTS / x86-64 |
 | Size | 2 vCPU, 2 GiB RAM, 60 GB disk |

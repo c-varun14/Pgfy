@@ -126,4 +126,13 @@ Recorded from the workstation while driving the live servers through the public 
 
 Issues found and fixed during this run: the application image lacked a CA bundle (object-storage TLS failed) — fixed in v0.2.2; libpq clients need `sslrootcert=system` for `verify-full` — connection examples updated in v0.2.2; tunnel-mode URLs now use `sslmode=disable` and project names may contain parentheses — v0.2.4.
 
+## Rebuild and graduation rehearsal — 2026-09-20 (release v0.3.0)
+
+Both previous instances were deleted and `pgfy-a` was created from a fresh Ubuntu 24.04 image with the existing static IP; a throwaway `pgfy-b-dryrun` instance was used for the second host and deleted afterwards. All timings are wall clock from the workstation.
+
+- **Install:** the one-line bootstrap on the fresh Lightsail instance took 63 s to a verified HTTPS dashboard with the Let's Encrypt certificate delivered to PostgreSQL (image pulls were fast; the earlier run measured about 4 minutes). Instance creation to a verified tunnel-mode install on the second host: 91 s (install 56 s).
+- **Freeze writes (new in v0.3.0):** freezing the `Shop` project took 0.9 s; the demo application's read returned its rows while an `INSERT` was refused with `cannot execute INSERT in a read-only transaction`; a manual backup while frozen completed in 1.9 s (3 rows, SHA-256 recorded); resuming allowed the next write.
+- **Graduation to the second host:** with only the bucket settings entered, the storage check passed (about 1 s), discovery listed the backups of all four projects (about 1 s), and the restore of `Shop` into a new project completed in 1 s with row count 3/3, ownership and permissions verified. The demo application read the three orders through the SSH tunnel and wrote a fourth. Administrator setup to verified restore: under 30 s of API time; the other three projects on the original host were untouched.
+- **Memory on the original host:** application 7.6 MiB, Caddy 12 MiB, PostgreSQL 54 MiB (Docker stats, idle with four projects).
+
 Not yet covered: a non-AWS host/storage pair (AlphaVPS + B2) — configuration-only by design, but unexercised; IPv6; certificate renewal failure handling beyond the daily timer.
