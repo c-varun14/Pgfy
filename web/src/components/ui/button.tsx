@@ -6,22 +6,28 @@ import { cn } from "../../lib/utils";
 const variants = cva("button", {
   variants: {
     variant: {
+      primary: "button-primary",
       default: "button-primary",
-      outline: "button-outline",
+      secondary: "button-secondary",
+      outline: "button-secondary",
       ghost: "button-ghost",
+      danger: "button-danger",
     },
+    size: { sm: "button-sm", md: "button-md" },
   },
-  defaultVariants: { variant: "default" },
+  defaultVariants: { variant: "primary", size: "md" },
 });
 export function Button({
   className,
   variant,
+  size,
+  loading = false,
   asChild = false,
   ...props
 }: React.ComponentProps<"button"> &
-  VariantProps<typeof variants> & { asChild?: boolean }) {
+  VariantProps<typeof variants> & { asChild?: boolean; loading?: boolean }) {
   const Component = asChild ? Slot : "button";
   return (
-    <Component className={cn(variants({ variant }), className)} {...props} />
+    <Component className={cn(variants({ variant, size }), className)} aria-busy={loading || undefined} disabled={loading || props.disabled} {...props} />
   );
 }
