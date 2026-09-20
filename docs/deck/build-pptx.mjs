@@ -63,12 +63,15 @@ const footer=(s,t)=>addText(s,t,.82,6.84,11.1,.26,{size:11.5,color:C.muted});
 
 // 4 — Scale & limits
 {
- const s=pptx.addSlide("PGFY");title(s,"How far $12 goes — and where it stops");
+ const s=pptx.addSlide("PGFY");title(s,"How far $12 goes — and how it grows");
  const stats=[["DATABASES ON ONE 2 GB BOX","50"],["IDLE APP CONNECTIONS","100 · 490 MiB in use"],["10 DATABASES LOADED","943 tx/s · 8,866 reads/s"],["ALL 50 WRITING AT ONCE","962 tx/s"]];
  stats.forEach((a,i)=>{const x=.82+(i%2)*2.9,y=1.48+Math.floor(i/2)*1.5;box(s,x,y,2.68,1.28);addText(s,a[0],x+.19,y+.15,2.3,.3,{size:8.5,bold:true,color:C.muted,charSpacing:1.1});addText(s,a[1],x+.19,y+.54,2.3,.5,{size:i===1||i===2?18:24,bold:true})});
- pill(s,"one node",.82,4.65,1.05,C.warn,C.warnSoft);pill(s,"24 h RPO",2.0,4.65,1.05,C.warn,C.warnSoft);pill(s,"150 pooled connections",3.18,4.65,1.75,C.warn,C.warnSoft);
- box(s,6.82,1.48,5.68,4.58);addText(s,"RDS is the industry-grade answer",7.08,1.72,5.15,.34,{size:18,bold:true});addText(s,"PITR · Multi-AZ failover · patching · monitoring · compliance",7.08,2.11,5.08,.3,{size:10.8,color:C.muted,mono:true});addText(s,"50 LOW-TRAFFIC DATABASES / MONTH",7.08,2.57,4.9,.24,{size:9,bold:true,color:C.muted,charSpacing:1});
- const rows=[["RDS, one instance per project","$699"],["RDS, one shared db.t4g.small","$25.66"],["Lightsail managed PostgreSQL 2 GB","$30"],["Pgfy on Lightsail + S3","$12.23"]];rows.forEach((r,i)=>{const y=2.91+i*.58;if(i===3)box(s,7.02,y-.02,5.25,.52,C.accentSoft,C.accentSoft);else s.addShape(S.line,{x:7.08,y:y-.03,w:5.07,h:0,line:{color:C.border}});addText(s,r[0],7.15,y,3.85,.42,{size:11.5,color:i===3?C.accent:C.text});addText(s,r[1],11.0,y,1.05,.42,{size:13,bold:true,mono:true,align:"right",color:i===3?C.accent:C.text})});addText(s,"Single-AZ · on-demand · us-east-1 · Sep 2026 · 90 GB of backups in S3 ≈ $2",7.08,5.45,5.03,.34,{size:8.6,color:C.faint});
+ pill(s,"daily backups, verified",.82,4.65,1.75,C.accent,C.accentSoft);pill(s,"150 pooled connections",2.7,4.65,1.75,C.accent,C.accentSoft);pill(s,"your box, your data",4.58,4.65,1.5,C.accent,C.accentSoft);
+ box(s,6.82,1.48,5.68,5.0);addText(s,"Grows with you",7.08,1.66,5.15,.34,{size:18,bold:true});
+ const rungs=[["1","Many small apps on one Pgfy box","$12 · 2 GB"],["2","One app takes off: its own Pgfy box, restored in under 5 min","$24 · 4 GB\n$44 · 8 GB"],["3","Want managed HA and PITR? pg_restore the archive into RDS","$116 · 8 GB\ndb.m6g.large"]];
+ rungs.forEach((r,i)=>{const y=2.06+i*.5;box(s,7.02,y,5.28,.44,C.raised,C.border);s.addShape(S.ellipse,{x:7.12,y:y+.09,w:.26,h:.26,fill:{color:C.accentSoft},line:{color:C.accentSoft}});addText(s,r[0],7.12,y+.09,.26,.26,{size:9.5,bold:true,color:C.accent,align:"center"});addText(s,r[1],7.46,y+.02,3.4,.4,{size:10.2,color:C.text});addText(s,r[2],10.85,y+.02,1.38,.4,{size:8.8,bold:true,mono:true,align:"right",color:C.accent})});
+ addText(s,"50 LOW-TRAFFIC DATABASES / MONTH",7.08,3.62,4.9,.24,{size:9,bold:true,color:C.muted,charSpacing:1});
+ const rows=[["RDS, one instance per project","$699"],["RDS, one shared db.t4g.small","$25.66"],["Lightsail managed PostgreSQL 2 GB","$30"],["Pgfy on Lightsail + S3","$12.23"]];rows.forEach((r,i)=>{const y=3.92+i*.55;if(i===3)box(s,7.02,y-.02,5.25,.5,C.accentSoft,C.accentSoft);else s.addShape(S.line,{x:7.08,y:y-.03,w:5.07,h:0,line:{color:C.border}});addText(s,r[0],7.15,y,3.85,.42,{size:11.5,color:i===3?C.accent:C.text});addText(s,r[1],11.0,y,1.05,.42,{size:13,bold:true,mono:true,align:"right",color:i===3?C.accent:C.text})});addText(s,"Single-AZ · on-demand · us-east-1 · Sep 2026 · 90 GB of backups in S3 ≈ $2",7.08,6.14,5.03,.3,{size:8.6,color:C.faint});
 }
 
 // 5 — Learning

@@ -77,8 +77,8 @@ Read the lines; the on-screen action is in brackets. Word count fits 150–160 w
 [Step 7 of the guide.]
 "New connection string. Three orders back, a fourth written. Under five minutes; the other three projects never noticed. Server dies at two a.m.? Identical flow."
 
-**S9 — 2:25–2:40 · Slide 4 (scale and limits)**
-"How far does it go? Fifty databases, a hundred pooled connections, under five hundred megabytes; all fifty writing at once, about a thousand transactions a second. One node, up to a day at risk. RDS is the industry-grade answer — point-in-time recovery, failover, patching — for workloads that need it. Pgfy is the first rung; the backup is a plain pg_dump, so RDS is one pg_restore away."
+**S9 — 2:25–2:40 · Slide 4 (scale and growth)**
+"How far does twelve dollars go? Fifty databases, a hundred pooled connections, under five hundred megabytes — all fifty writing at once, about a thousand transactions a second. And it grows with you: when one app takes off, it gets its own Pgfy box — twenty-four dollars for four gigs, forty-four for eight — restored in under five minutes, the same flow you just watched. The day you want managed failover and point-in-time recovery, the backup is a plain pg_dump: one pg_restore into RDS. Every rung is yours to choose."
 
 **S10 — 2:40–2:50 · Slide 5 (learning)**
 "My first S3 backup failed: the app image had no CA bundle. Minimal images hide what's missing — the release pipeline now runs a real S3 check before publishing."
@@ -91,7 +91,7 @@ Read the lines; the on-screen action is in brackets. Word count fits 150–160 w
 1. **Hook** — `50 databases · $12/month · restores you can verify` (numbers appear one by one).
 2. **Story** — `$20/month · $240/year for one Postgres · "hosting is on you" · workers every 10 s never sleep` and the Neon arithmetic `0.25 CU × 730 h × $0.106 = $19.34/project`.
 3. **Architecture** — Lightsail box (Caddy → Go app + React → Postgres 18, SQLite state) → S3 bucket (archive + manifest + SHA-256) ← IAM user; `pg_restore` arrow to RDS as the exit.
-4. **Scale and limits** — table: 50 DBs / 100 idle connections / 490 MiB; 10 DBs loaded 943 tx/s and 8,866 reads/s; all 50 writing 962 tx/s; `one node · 24 h RPO · 150 pooled connections`; beside it RDS: `PITR · Multi-AZ · patching · compliance`; cost row: RDS one-per-project $699 · RDS one shared $25.66 · Lightsail managed 2 GB $30 · Pgfy $12.23 (Single-AZ, us-east-1, Sep 2026).
+4. **Scale and growth** — stats: 50 DBs / 100 idle connections / 490 MiB; 10 DBs loaded 943 tx/s and 8,866 reads/s; all 50 writing 962 tx/s; pills `daily backups, verified · 150 pooled connections · your box, your data`; the ladder: 1 many apps on one box ($12 · 2 GB) → 2 one app takes off, its own Pgfy box restored in under 5 min ($24 · 4 GB, $44 · 8 GB) → 3 managed HA/PITR via `pg_restore` into RDS ($116 · 8 GB db.m6g.large); cost table: RDS one-per-project $699 · RDS one shared $25.66 · Lightsail managed 2 GB $30 · Pgfy $12.23 (Single-AZ, us-east-1, Sep 2026).
 5. **Learning** — `No CA bundle → TLS to S3 failed → release pipeline runs a real S3 check`.
 6. **What's next** — production gate before real workloads; project deletion with a final backup; backup retention cleanup; PgBouncer; alerts; one-click updates; team permissions; second host + S3-compatible storage validation (AlphaVPS + B2).
 7. **Close** — repo URL, `pgfy-a` dashboard URL, "Lightsail · S3 · IAM".
