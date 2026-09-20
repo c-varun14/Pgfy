@@ -22,7 +22,9 @@ ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/pgfy ./cmd/pgfy
 
 FROM ${POSTGRES_IMAGE}
-RUN groupadd --gid 10001 pgfy && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin pgfy \
+# The base image ships no CA bundle; backups need to verify object-storage TLS.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 pgfy && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin pgfy \
     && mkdir -p /data && chown 10001:10001 /data \
     && psql --version | grep -E '18\.6([[:space:]]|$)' \
     && pg_dump --version | grep -E '18\.6([[:space:]]|$)' \

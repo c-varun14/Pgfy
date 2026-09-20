@@ -259,12 +259,12 @@ function ConnectionPanel({ project, access }: { project: Project; access: Databa
           )}
           {snippet === "python" && (
             <CodeBlock
-              value={`# pip install "psycopg[binary]"\nimport os, psycopg\nwith psycopg.connect(os.environ["DATABASE_URL"]) as conn:\n    print(conn.execute("select now()").fetchone())`}
+              value={`# pip install "psycopg[binary]"\nimport os, psycopg\n# libpq needs to be told to use the system trust store for verify-full\nwith psycopg.connect(os.environ["DATABASE_URL"], sslrootcert="system") as conn:\n    print(conn.execute("select now()").fetchone())`}
             />
           )}
           {access.mode === "direct" && (
             <p className="muted small">
-              <code>sslmode=verify-full</code> checks the certificate against your system’s trusted authorities (libpq 16+ uses them automatically; older clients need <code>sslrootcert=system</code>). Set <code>DATABASE_URL</code> in your app’s environment; never commit it.
+              <code>sslmode=verify-full</code> checks the certificate against your system’s trusted authorities. Node.js, Go and JDBC drivers do this on their own; libpq-based clients (psql, Python psycopg, Ruby) additionally need <code>sslrootcert=system</code>, as shown in the psql and Python examples. Set <code>DATABASE_URL</code> in your app’s environment; never commit it.
             </p>
           )}
         </>

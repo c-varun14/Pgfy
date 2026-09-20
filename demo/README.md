@@ -10,5 +10,5 @@ node demo.js write "Order #1001 from the shop"
 node demo.js read
 ```
 
-`sslmode=verify-full` checks the server certificate against your system's trusted authorities.
+`sslmode=verify-full` checks the server certificate against your system's trusted authorities (the Node driver uses them automatically; `psql` needs `sslrootcert=system` added).
 Through an SSH tunnel use the URL the dashboard shows for tunnel mode (`sslmode=require`).
