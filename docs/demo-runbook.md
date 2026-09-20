@@ -84,17 +84,17 @@ Read the lines; the on-screen action is in brackets. Word count fits 150–160 w
 "My first S3 backup failed: the app image had no CA bundle. Minimal images hide what's missing — the release pipeline now runs a real S3 check before publishing."
 
 **S11 — 2:50–2:55 · Slides 6–7 (next, close)** — slide 6 is on screen for the last sentence of S10 or skipped if time is short; the spoken close is unchanged.
-"Pgfy. Lightsail, S3, IAM. Cheap enough to experiment, honest about its limits, a way out when you win."
+"Pgfy: every project's database on one server you own, with backups that prove they restore — and it grows with you. Lightsail, S3, IAM. The repo is in the description."
 
 ## Slides (seven)
 
 1. **Hook** — `50 databases · $12/month · restores you can verify` (numbers appear one by one).
-2. **Story** — `$20/month · $240/year for one Postgres · "hosting is on you" · workers every 10 s never sleep` and the Neon arithmetic `0.25 CU × 730 h × $0.106 = $19.34/project`.
+2. **Story** — three numbered columns: `01 The bill` (“Hosting is on you.” · $20/month, $240/year for one Postgres on top of AI and VPS bills) → `02 What I tried` (Dokploy · RDS · Neon with `0.25 CU × 730 h × $0.106 = $19.34`) → `03 What I wanted` (one server I own · a database per project in one click · backups that prove they restore).
 3. **Architecture** — Lightsail box (Caddy → Go app + React → Postgres 18, SQLite state) → S3 bucket (archive + manifest + SHA-256) ← IAM user; `pg_restore` arrow to RDS as the exit.
 4. **Scale and growth** — stats: 50 DBs / 100 idle connections / 490 MiB; 10 DBs loaded 943 tx/s and 8,866 reads/s; all 50 writing 962 tx/s; pills `daily backups, verified · 150 pooled connections · your box, your data`; the ladder: 1 many apps on one box ($12 · 2 GB) → 2 one app takes off, its own Pgfy box restored in under 5 min ($24 · 4 GB, $44 · 8 GB) → 3 managed HA/PITR via `pg_restore` into RDS ($116 · 8 GB db.m6g.large); cost table: RDS one-per-project $699 · RDS one shared $25.66 · Lightsail managed 2 GB $30 · Pgfy $12.23 (Single-AZ, us-east-1, Sep 2026).
 5. **Learning** — `No CA bundle → TLS to S3 failed → release pipeline runs a real S3 check`.
-6. **What's next** — production gate before real workloads; project deletion with a final backup; backup retention cleanup; PgBouncer; alerts; one-click updates; team permissions; second host + S3-compatible storage validation (AlphaVPS + B2).
-7. **Close** — repo URL, `pgfy-a` dashboard URL, "Lightsail · S3 · IAM".
+6. **What's next** — production gate before real workloads; project deletion with a final backup; backup retention cleanup; PgBouncer; alerts; one-click updates; team permissions and a SQL editor; IPv6 and DNS-01 certificates.
+7. **Close** — `pgfy.` · “Every project’s database on one server you own. Backups that prove they restore.” · stack line · repo and dashboard URLs · Lightsail · S3 · IAM.
 
 ## OBS
 

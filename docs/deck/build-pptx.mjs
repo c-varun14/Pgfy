@@ -6,7 +6,7 @@ const pptx = new pptxgen();
 pptx.layout = "LAYOUT_WIDE";
 pptx.author = "Pgfy";
 pptx.subject = "Pgfy pitch deck";
-pptx.title = "Pgfy — Cheap enough to experiment";
+pptx.title = "Pgfy — every project’s database on one server you own";
 pptx.company = "Pgfy";
 pptx.lang = "en-US";
 pptx.theme = {
@@ -17,7 +17,8 @@ pptx.defineSlideMaster({
   background: { color: "111412" },
   objects: [
     { image: { data: markData, x: .68, y: .29, w: .28, h: .28 } },
-    { text: { text: [{ text: "pgfy", options: { color: "ECEFE9" } }, { text: ".", options: { color: "8FC7A2" } }], options: { x: .96, y: .32, w: .7, h: .25, fontFace: "Inter", fontSize: 12, bold: true, margin: 0 } } }
+    { text: { text: "pgfy", options: { x: .96, y: .32, w: .5, h: .25, fontFace: "Inter", fontSize: 12, bold: true, color: "ECEFE9", margin: 0 } } },
+    { text: { text: ".", options: { x: 1.335, y: .32, w: .12, h: .25, fontFace: "Inter", fontSize: 12, bold: true, color: "8FC7A2", margin: 0 } } }
   ],
   slideNumber: { x: 12.24, y: 7.16, w: .35, h: .15, color: "737C74", fontFace: "JetBrains Mono", fontSize: 7, align: "right", margin: 0 }
 });
@@ -40,13 +41,19 @@ const footer=(s,t)=>addText(s,t,.82,6.84,11.1,.26,{size:11.5,color:C.muted});
 // 2 — Story
 {
  const s=pptx.addSlide("PGFY"); title(s,"Why I built it");
- const cards=[
-  ["$20 / month","$240 a year for one Postgres — on top of AI and VPS bills, for an app with a tiny audience. “Hosting is on you.”",null],
-  ["Dokploy · RDS","One-click self-hosting spoiled me, but its databases weren’t managed the way I needed.","RDS documents many databases per instance — then leaves every role, password and backup to you."],
-  ["Neon","My apps run workers every 10 s — the database never sleeps.","0.25 CU × 730 h × $0.106\n= $19.34 / project / month"]
- ];
- cards.forEach((c,i)=>{const x=.82+i*4.08;box(s,x,1.48,3.82,3.85);addText(s,c[0],x+.25,1.72,3.3,.42,{size:21,bold:true});addText(s,c[1],x+.25,2.25,3.3,1.75,{size:15,valign:"top",breakLine:false});if(c[2]){s.addShape(S.line,{x:x+.25,y:4.12,w:3.3,h:0,line:{color:C.border}});addText(s,c[2],x+.25,4.22,3.3,.8,{size:i===2?11.2:12.5,color:i===2?C.codeFg:C.muted,mono:i===2,valign:"top"})}});
- footer(s,"In the AI era we all ship niche apps for small audiences: many small databases, none of them big.");
+ const colW=[3.45,4.55,3.45],gap=.19;let x=.82;
+ // 01 · The bill
+ box(s,x,1.48,colW[0],4.3);addText(s,"01 · THE BILL",x+.24,1.68,3,.24,{size:8.5,bold:true,color:C.muted,charSpacing:1.1});addText(s,"“Hosting is on you.”",x+.24,1.98,3.0,.42,{size:19,bold:true});
+ addText(s,[{text:"A client wouldn’t pay for infrastructure. One managed Postgres was "},{text:"$20 a month — $240 a year",options:{bold:true}},{text:" — on top of AI and VPS bills, for an app with a tiny audience. Multiply by every small project an agency runs."}],x+.24,2.48,2.98,2.6,{size:13.5,valign:"top",breakLine:false});
+ x+=colW[0]+gap;
+ // 02 · What I tried
+ box(s,x,1.48,colW[1],4.3);addText(s,"02 · WHAT I TRIED",x+.24,1.68,3,.24,{size:8.5,bold:true,color:C.muted,charSpacing:1.1});
+ const tried=[["Dokploy","One-click self-hosting, but its databases weren’t managed the way I needed."],["RDS","Documents many databases per instance — then leaves every role, password and backup to you."],["Neon","Workers every 10 s keep it awake — $19.34 per project, always on.\n0.25 CU × 730 h × $0.106"]];
+ tried.forEach((t,k)=>{const y=2.05+k*1.2;if(k)s.addShape(S.line,{x:x+.24,y:y-.1,w:colW[1]-.48,h:0,line:{color:C.border}});addText(s,t[0],x+.24,y,.95,.4,{size:13,bold:true,color:C.accent,valign:"top"});addText(s,t[1],x+1.2,y,colW[1]-1.45,1.0,{size:12.5,valign:"top",breakLine:false})});
+ x+=colW[1]+gap;
+ // 03 · What I wanted
+ box(s,x,1.48,colW[2],4.3,C.accentSoft,"2F4A3A");addText(s,"03 · WHAT I WANTED",x+.24,1.68,3,.24,{size:8.5,bold:true,color:C.accent,charSpacing:1.1});addText(s,"One server I own. A database per project in one click. Backups that prove they restore.",x+.24,1.98,2.98,2.2,{size:19,bold:true,valign:"top",breakLine:false});
+ footer(s,"In the AI era we all ship niche apps for small audiences: many small databases, none of them big. That is what Pgfy is for.");
 }
 
 // 3 — Architecture
@@ -81,12 +88,12 @@ const footer=(s,t)=>addText(s,t,.82,6.84,11.1,.26,{size:11.5,color:C.muted});
 
 // 6 — What's next
 {
- const s=pptx.addSlide("PGFY");title(s,"What’s next");const items=[["gate","Production hardening gate before real workloads"],["planned","Delete a project — final backup first, then role and database"],["planned","Backup retention cleanup in the bucket"],["planned","PgBouncer — hundreds of app connections on one box"],["planned","Alerts when a backup or certificate renewal fails"],["planned","One-click updates"],["planned","Team permissions and a SQL editor"],["planned","Second host + S3-compatible storage validation (AlphaVPS + Backblaze B2)"]];items.forEach((it,i)=>{const x=.82+(i%2)*6.02,y=1.45+Math.floor(i/2)*1.12;box(s,x,y,5.72,.92);pill(s,it[0],x+.18,y+.315,.82,it[0]==="gate"?C.accent:C.warn,it[0]==="gate"?C.accentSoft:C.warnSoft);addText(s,it[1],x+1.15,y+.12,4.32,.67,{size:12.2,valign:"mid"})});footer(s,"Everything here is listed as planned in the README — nothing on this slide is claimed as implemented.");
+ const s=pptx.addSlide("PGFY");title(s,"What’s next");const items=[["gate","Production hardening gate before real workloads"],["planned","Delete a project — final backup first, then role and database"],["planned","Backup retention cleanup in the bucket"],["planned","PgBouncer — hundreds of app connections on one box"],["planned","Alerts when a backup or certificate renewal fails"],["planned","One-click updates"],["planned","Team permissions and a SQL editor"],["planned","IPv6 and DNS-01 certificate issuance"]];items.forEach((it,i)=>{const x=.82+(i%2)*6.02,y=1.45+Math.floor(i/2)*1.12;box(s,x,y,5.72,.92);pill(s,it[0],x+.18,y+.315,.82,it[0]==="gate"?C.accent:C.warn,it[0]==="gate"?C.accentSoft:C.warnSoft);addText(s,it[1],x+1.15,y+.12,4.32,.67,{size:12.2,valign:"mid"})});footer(s,"Roadmap, straight from the README’s planned list.");
 }
 
 // 7 — Close
 {
- const s=pptx.addSlide("PGFY");addText(s,[{text:"pgfy",options:{color:C.text}},{text:".",options:{color:C.accent}}],.82,1.42,5.5,.9,{size:65,bold:true});addText(s,"Cheap enough to experiment.\nHonest about its limits.\nA way out when you win.",.82,2.55,9.8,1.75,{size:33,bold:true});addText(s,"github.com/c-varun14/Pgfy\nfirstcommit.webbywasp.com",.82,4.65,5.4,.72,{size:14,mono:true,color:C.muted});pill(s,"Lightsail",.82,5.72,1.05,C.text,C.surface);pill(s,"S3",2.02,5.72,.68,C.text,C.surface);pill(s,"IAM",2.84,5.72,.75,C.text,C.surface);
+ const s=pptx.addSlide("PGFY");addText(s,[{text:"pgfy",options:{color:C.text}},{text:".",options:{color:C.accent}}],.82,1.42,5.5,.9,{size:65,bold:true});addText(s,"Every project’s database on one server you own.\nBackups that prove they restore.",.82,2.5,11.3,1.3,{size:31,bold:true});addText(s,"Open source · Go + React · PostgreSQL 18 · one-command install on Lightsail · backups to S3",.82,3.92,11.3,.4,{size:14,color:C.muted});addText(s,"github.com/c-varun14/Pgfy\nfirstcommit.webbywasp.com",.82,4.65,5.4,.72,{size:14,mono:true,color:C.muted});pill(s,"Lightsail",.82,5.72,1.05,C.text,C.surface);pill(s,"S3",2.02,5.72,.68,C.text,C.surface);pill(s,"IAM",2.84,5.72,.75,C.text,C.surface);
 }
 
 await pptx.writeFile({ fileName: "pgfy-pitch.pptx" });
