@@ -140,7 +140,7 @@ Diagnostics print safe state, not raw credentials or container logs. Operators c
 
 ## Database access
 
-Applications connect to PostgreSQL at the dashboard hostname on port 5432 with TLS (`sslmode=verify-full`, using the same publicly trusted certificate as the dashboard). In HTTPS mode the installer publishes 5432 on all interfaces; **open TCP 5432 in your provider firewall** to allow application traffic. Both layers must allow a connection: the provider firewall and the per-project allowlist in the dashboard. Remember that your application's server has its own outbound IP, which usually differs from the address you browse from.
+Applications connect to PostgreSQL at the dashboard hostname on port 5432 with TLS (`sslmode=verify-full`, using the same publicly trusted certificate as the dashboard). libpq-based clients such as `psql`, Python's psycopg and Ruby additionally need `sslrootcert=system` to use the operating system's trust store; Node.js, Go and JDBC drivers use it by default. In HTTPS mode the installer publishes 5432 on all interfaces; **open TCP 5432 in your provider firewall** to allow application traffic. Both layers must allow a connection: the provider firewall and the per-project allowlist in the dashboard. Remember that your application's server has its own outbound IP, which usually differs from the address you browse from.
 
 In tunnel mode PostgreSQL is published on the host loopback only. Developers forward it from their computer and connect to `127.0.0.1:5432`:
 
