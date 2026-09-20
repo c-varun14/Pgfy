@@ -43,7 +43,7 @@ func validProjectName(name string) bool {
 		return false
 	}
 	for _, r := range name {
-		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_' || r == '.') {
+		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(" -_.()", r)) {
 			return false
 		}
 	}
@@ -107,7 +107,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validProjectName(in.Name) {
-		failure(w, 400, "invalid_name", "Use 1–64 letters, digits, spaces, dots, dashes, or underscores.")
+		failure(w, 400, "invalid_name", "Use 1–64 letters, digits, spaces, dots, dashes, underscores, or parentheses.")
 		return
 	}
 	key := in.IdempotencyKey
@@ -203,8 +203,9 @@ func (s *Server) projectCredentials(r *http.Request, p store.Project) (connectio
 	access := s.databaseAccess()
 	c := connectionDetails{Host: access.Host, Port: access.Port, Database: p.DBName, User: p.RoleName, Password: string(password), SSLMode: "verify-full"}
 	if access.Mode == "tunnel" {
-		// Through an SSH tunnel the hostname is loopback; TLS still runs but cannot be verified.
-		c.SSLMode = "require"
+		// The SSH tunnel already encrypts the hop; PostgreSQL TLS cannot be verified
+		// against a loopback hostname and some drivers refuse the placeholder cert.
+		c.SSLMode = "disable"
 	}
 	c.URL = fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s", url.PathEscape(c.User), url.PathEscape(c.Password), c.Host, c.Port, c.Database, c.SSLMode)
 	c.Psql = fmt.Sprintf("psql %q", c.libpqURL())
