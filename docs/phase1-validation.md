@@ -111,3 +111,19 @@ private-network checks. Preserve release checksums and the existing automated ch
 ## Phase 1 demo script
 
 Show the verified HTTPS address, enter a token without recording its value, create the administrator, and inspect Overview and Settings. Stop PostgreSQL from the host to demonstrate degraded readiness with a usable dashboard; restart it and refresh. Show host diagnostics with secrets redacted. Do not present project provisioning, backups, recovery, or production readiness as implemented.
+
+## MVP deployment evidence — 2026-09-20 (release v0.2.3)
+
+Recorded from the workstation while driving the live servers through the public API and SSH; no secrets are included.
+
+- **One-line install, Lightsail (`firstcommit-phase1`, Ubuntu 24.04 x86-64, 2 vCPU / 2 GiB):** the published bootstrap installed Docker, pulled the pinned images, verified HTTPS at `https://firstcommit.webbywasp.com`, and `sync-db-cert` delivered the Let's Encrypt certificate to PostgreSQL in the same run (about 4 minutes wall clock). A second fresh install of the same host after a wipe behaved identically.
+- **Firewall:** TCP 80/443/5432 public, 22 restricted to operator addresses, the stale 3000 rule removed.
+- **Direct TLS connection from the internet:** `psql "…?sslmode=verify-full&sslrootcert=system"` connected with TLSv1.3 / `TLS_AES_256_GCM_SHA384` and a chain verified by the system trust store. Connecting by IP failed hostname verification; `sslmode=disable` was rejected by `pg_hba.conf` ("no encryption"); a foreign database name was rejected.
+- **Demo application (`demo/`, Node `pg`):** wrote three recognizable "Order" rows over TLS.
+- **Backup to AWS S3 (`pgfy-backups-…`, private, SSE-S3, bucket-scoped IAM user):** the storage check passed all four steps; a manual backup completed in 0.8 s (3086-byte custom-format archive, SHA-256 recorded, row count 3 captured in the dump snapshot); archive and manifest listed in the bucket; the next scheduled backup was reported for 24 hours later.
+- **Recovery on a replacement server (`firstcommit-recovery`, fresh Lightsail instance, tunnel mode):** with only the bucket settings entered, discovery listed the backup (3 minutes old); the restore into a new project completed in 2.0 s and verified row counts (3/3), ownership, and permissions. The demo application read the three orders and wrote a fourth through the SSH tunnel. Wall clock from administrator setup to verified restore: under 2 minutes; install about 1 minute before that.
+- **Original server:** left running and unchanged during the rehearsal (the static-IP move is an operator step, see the runbook).
+
+Issues found and fixed during this run: the application image lacked a CA bundle (object-storage TLS failed) — fixed in v0.2.2; libpq clients need `sslrootcert=system` for `verify-full` — connection examples updated in v0.2.2; tunnel-mode URLs now use `sslmode=disable` and project names may contain parentheses — v0.2.4.
+
+Not yet covered: a non-AWS host/storage pair (AlphaVPS + B2) — configuration-only by design, but unexercised; IPv6; certificate renewal failure handling beyond the daily timer.

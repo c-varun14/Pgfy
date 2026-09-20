@@ -152,7 +152,7 @@ def main():
                 assert body["project"]["policy"]["state"] == "applied" and body["project"]["policy"]["applied_revision"] == 1, body["project"]["policy"]
                 assert body["project"]["size_bytes"] > 0
                 code, credentials = request(f"/api/v1/projects/{created['id']}/credentials")
-                assert code == 200 and credentials["sslmode"] == "require" and credentials["host"] == "127.0.0.1" and "sslrootcert" not in credentials["url"]
+                assert code == 200 and credentials["sslmode"] == "disable" and credentials["host"] == "127.0.0.1" and "sslrootcert" not in credentials["url"]
                 projects[name] = dict(created, credentials=credentials)
             assert len(request("/api/v1/projects")[1]["projects"]) == 2
             assert sql("SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication FROM pg_roles WHERE rolname='" + projects["Shop"]["db_name"] + "';") == "f"

@@ -148,7 +148,7 @@ In tunnel mode PostgreSQL is published on the host loopback only. Developers for
 ssh -N -L 5432:127.0.0.1:5432 user@server
 ```
 
-Loopback-forwarded connections are admitted per project without a public port; the certificate cannot be verified through the tunnel, so the dashboard shows a `sslmode=require` URL there.
+Loopback-forwarded connections are admitted per project without a public port; the SSH tunnel encrypts the hop, so the dashboard shows a `sslmode=disable` URL there.
 
 If the DNS record for the hostname is proxied through a CDN (for example Cloudflare's orange cloud), PostgreSQL connections will not pass through it: use a DNS-only record for the database hostname.
 
