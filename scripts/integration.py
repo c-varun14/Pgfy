@@ -249,9 +249,9 @@ def main():
             assert interrupted["state"] == "interrupted" and interrupted["stage"] == "upload_archive", interrupted
             # The schedule notices Blog has no backup yet and catches up after the restart; the
             # interrupted job itself must never have published a manifest.
-            for _ in range(60):
+            for _ in range(90):
                 blog_history = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]
-                if blog_history["backups"]:
+                if blog_history["backups"] and not any(j["state"] in ("queued", "running") for j in blog_history["jobs"]):
                     break
                 time.sleep(1)
             assert blog_history["backups"] and blog_history["backups"][0]["job_id"] != stuck["id"], blog_history
