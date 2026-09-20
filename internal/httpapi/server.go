@@ -110,6 +110,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{id}/retry", s.retryProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}/credentials", s.getCredentials)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/access", s.updateAccess)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/writes", s.updateWrites)
 	mux.HandleFunc("POST /api/v1/projects/{id}/connection-checks", s.createConnectionCheck)
 	mux.HandleFunc("GET /api/v1/projects/{id}/connection-checks/{check}", s.getConnectionCheck)
 	mux.HandleFunc("GET /api/v1/settings/storage", s.getStorage)

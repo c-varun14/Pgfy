@@ -14,6 +14,7 @@ import { EmptyArt } from "../components/ui/empty-art";
 
 export function databaseStage(project: Project) {
   if (project.failed) return { tone: "bad" as const, label: "Needs attention" };
+  if (project.stage === "ready" && project.frozen_at) return { tone: "neutral" as const, label: "Writes frozen" };
   if (project.stage === "ready") return { tone: "good" as const, label: "Ready" };
   return { tone: "wait" as const, label: "Setting up…" };
 }

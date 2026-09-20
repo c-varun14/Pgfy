@@ -12,8 +12,11 @@ if (!url) {
 const client = new pg.Client({ connectionString: url, application_name: process.env.PGAPPNAME || "pgfy-demo" });
 try {
   await client.connect();
-  await client.query("CREATE TABLE IF NOT EXISTS guestbook (id serial PRIMARY KEY, message text NOT NULL, written_at timestamptz NOT NULL DEFAULT now())");
   if (command === "write") {
+    // Create the table only when it is missing, and only on the write path: DDL is refused while the
+    // dashboard has writes frozen, and reads must keep working then.
+    const { rows: existing } = await client.query("SELECT to_regclass('guestbook') AS name");
+    if (!existing[0].name) await client.query("CREATE TABLE guestbook (id serial PRIMARY KEY, message text NOT NULL, written_at timestamptz NOT NULL DEFAULT now())");
     const message = rest.join(" ") || `Entry written at ${new Date().toISOString()}`;
     const { rows } = await client.query("INSERT INTO guestbook (message) VALUES ($1) RETURNING id, written_at", [message]);
     console.log(`Wrote entry #${rows[0].id} at ${rows[0].written_at.toISOString()}: ${message}`);
@@ -27,6 +30,10 @@ try {
   }
   const { rows } = await client.query("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()");
   console.log(rows[0]?.ssl ? "Connected with TLS." : "Connected WITHOUT TLS.");
+} catch (error) {
+  // One readable line instead of a stack trace: rejected connections and frozen writes are expected outcomes.
+  console.error(`Failed: ${error.message}`);
+  process.exitCode = 1;
 } finally {
   await client.end();
 }

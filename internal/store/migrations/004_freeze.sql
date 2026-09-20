@@ -1,0 +1,1 @@
+ALTER TABLE projects ADD COLUMN frozen_at INTEGER;

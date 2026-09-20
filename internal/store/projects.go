@@ -21,21 +21,25 @@ type Project struct {
 	StageError string `json:"stage_error"`
 	CreatedAt  int64  `json:"created_at"`
 	ReadyAt    int64  `json:"ready_at"`
+	FrozenAt   int64  `json:"frozen_at"` // unix seconds while writes are frozen, else 0
 }
 
 func (s *Store) scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var p Project
-	var ready sql.NullInt64
+	var ready, frozen sql.NullInt64
 	var failed int
-	e := row.Scan(&p.ID, &p.Name, &p.DBName, &p.RoleName, &p.Stage, &failed, &p.StageError, &p.CreatedAt, &ready)
+	e := row.Scan(&p.ID, &p.Name, &p.DBName, &p.RoleName, &p.Stage, &failed, &p.StageError, &p.CreatedAt, &ready, &frozen)
 	p.Failed = failed != 0
 	if ready.Valid {
 		p.ReadyAt = ready.Int64
 	}
+	if frozen.Valid {
+		p.FrozenAt = frozen.Int64
+	}
 	return p, e
 }
 
-const projectCols = "id,name,db_name,role_name,stage,failed,stage_error,created_at,ready_at"
+const projectCols = "id,name,db_name,role_name,stage,failed,stage_error,created_at,ready_at,frozen_at"
 
 // CreateProject persists identity and sealed credentials atomically; a repeated
 // idempotency key returns the existing project with created=false.
@@ -137,6 +141,26 @@ func (s *Store) FailProject(ctx context.Context, id, stageError string) error {
 // persisted stage using the existing identity.
 func (s *Store) RetryProject(ctx context.Context, id string) error {
 	res, e := s.DB.ExecContext(ctx, "UPDATE projects SET failed=0, stage_error='' WHERE id=? AND failed=1", id)
+	if e != nil {
+		return e
+	}
+	n, e := res.RowsAffected()
+	if e != nil {
+		return e
+	}
+	if n != 1 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
+// SetProjectFrozen records when writes were frozen; a zero time resumes writes.
+func (s *Store) SetProjectFrozen(ctx context.Context, id string, at time.Time) error {
+	var value any
+	if !at.IsZero() {
+		value = at.Unix()
+	}
+	res, e := s.DB.ExecContext(ctx, "UPDATE projects SET frozen_at=? WHERE id=?", value, id)
 	if e != nil {
 		return e
 	}

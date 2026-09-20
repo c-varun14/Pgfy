@@ -110,6 +110,21 @@ func TestProjectStagesAndRetry(t *testing.T) {
 	if len(incomplete) != 0 {
 		t.Fatal("ready project still queued")
 	}
+	if e = s.SetProjectFrozen(ctx, p.ID, now); e != nil {
+		t.Fatal(e)
+	}
+	if got, _ = s.Project(ctx, p.ID); got.FrozenAt != now.Unix() {
+		t.Fatal("frozen_at not recorded", got)
+	}
+	if e = s.SetProjectFrozen(ctx, p.ID, time.Time{}); e != nil {
+		t.Fatal(e)
+	}
+	if got, _ = s.Project(ctx, p.ID); got.FrozenAt != 0 {
+		t.Fatal("frozen_at not cleared", got)
+	}
+	if e = s.SetProjectFrozen(ctx, "prj_missing", now); !errors.Is(e, ErrProjectNotFound) {
+		t.Fatal("missing project", e)
+	}
 }
 
 func TestPolicyRevisionOptimisticCheck(t *testing.T) {

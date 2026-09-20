@@ -99,6 +99,8 @@ export type Project = {
   stage_error: string;
   created_at: number;
   ready_at: number;
+  /** Unix seconds since application writes were frozen; 0 while writes are allowed. */
+  frozen_at: number;
   size_bytes: number | null;
   size_error?: string;
   policy?: PolicyState;

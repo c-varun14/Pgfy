@@ -17,6 +17,7 @@ All application endpoints use JSON under `/api/v1`. Responses containing authent
 | `POST /api/v1/projects/{id}/retry` | `{}` + CSRF | 204; resumes a failed project from its recorded stage |
 | `GET /api/v1/projects/{id}/credentials` | Session cookie | Host, port, database, user, password, `sslmode`, `url`, `psql`; 409 until ready; never logged |
 | `PUT /api/v1/projects/{id}/access` | `{revision, addresses[]}` + CSRF | Replaces the allowlist under an optimistic revision (409 on conflict, 400 on invalid addresses) and applies it; returns the policy state |
+| `PUT /api/v1/projects/{id}/writes` | `{frozen}` + CSRF | Freezes or resumes application writes for a ready project (409 before ready); returns the project with `frozen_at` |
 | `POST /api/v1/projects/{id}/connection-checks` | `{}` + CSRF | 201 `{id, application_name, command, expires_at}` |
 | `GET /api/v1/projects/{id}/connection-checks/{check}` | Session cookie | `pending`, `successful` (with `evidence: {client_addr, tls, observed_at}`) or `expired` |
 | `GET /api/v1/settings/storage` | Session cookie | `{configured, settings}` with masked credentials |
@@ -47,6 +48,8 @@ Project names are 1–64 letters, digits, spaces, dots, dashes, underscores, or 
 The management connection uses the non-superuser `pgfy_mgmt` role (CREATEDB/CREATEROLE only). Project roles are `NOSUPERUSER NOCREATEDB NOCREATEROLE` with a connection limit; every project database revokes `PUBLIC` privileges so other projects cannot connect.
 
 `policy.state` is `applied` only after PostgreSQL parsed the rule file without errors and reported a newer `pg_conf_load_time()`. Addresses default to `0.0.0.0/0` and `::/0` (any address over TLS with the password). Remote rules are `hostssl` only, so non-TLS remote connections are rejected. SSH-tunnel connections arrive from the Docker gateway and are admitted per project regardless of the allowlist.
+
+Freezing writes sets `default_transaction_read_only = on` on the project role and terminates its sessions, so pooled applications reconnect read-only: reads continue, writes fail with PostgreSQL's read-only transaction error, and a backup taken while frozen captures everything (backups are snapshot-consistent either way). The change is recorded only after PostgreSQL applied it and is reverted if recording fails. The freeze is cooperative — a client can `SET transaction_read_only = off` — so it is a tool for the operator's own applications before a move or a maintenance window, not an access control; the allowlist is the access control.
 
 Connection checks are observed, not simulated: the dashboard issues an `application_name`; when a session with that name appears in `pg_stat_activity` for the project role, the client address and TLS state are recorded once as evidence.
 
