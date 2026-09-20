@@ -11,4 +11,4 @@ node demo.js read
 ```
 
 `sslmode=verify-full` checks the server certificate against your system's trusted authorities (the Node driver uses them automatically; `psql` needs `sslrootcert=system` added).
-Through an SSH tunnel use the URL the dashboard shows for tunnel mode (`sslmode=require`).
+Through an SSH tunnel use the URL the dashboard shows for tunnel mode (`sslmode=disable`; the tunnel encrypts the hop).
