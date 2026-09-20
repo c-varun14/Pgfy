@@ -51,7 +51,7 @@ Read the lines; the on-screen action is in brackets. Word count fits 150–160 w
 "Fifty small databases. One twelve-dollar server on AWS. Backups to S3, and restores that verify themselves. This is Pgfy."
 
 **S2 — 0:12–0:50 · Slide 2 (story)**
-"I run a small agency. A client told me hosting was on us — and even a two-hundred-forty-dollar month hurt. Dokploy spoiled me with one-click self-hosting, but its databases weren't managed the way I needed. RDS's own docs say: run one Postgres, many databases, manage the credentials yourself. I wanted that — with one click, and real backups. Neon? My apps run workers every ten seconds, so the database never sleeps: nineteen dollars per project, always on. And in the AI era we all ship niche apps for small audiences — many small databases, none of them big. So I built Pgfy."
+"I run a small agency. A client told me hosting was on us. Twenty dollars a month for one Postgres — two-forty a year — on top of AI bills and VPS bills, for an app with a tiny audience. Dokploy spoiled me with one-click self-hosting, but its databases weren't managed the way I needed. RDS's own docs say you can run many databases in one instance — and then leave you to create every role, password and backup by hand. I wanted that, with one click and real backups. Neon? My apps run workers every ten seconds, so the database never sleeps: nineteen dollars per project, always on. In the AI era we all ship niche apps for small audiences — many small databases, none of them big. So I built Pgfy."
 
 **S3 — 0:50–1:05 · AWS console, then slide 3 (architecture)**
 [Lightsail: `pgfy-a` running; S3: the bucket, `pgfy/demo/backups/…/manifest.json`; IAM user `pgfy-backups`.]
@@ -83,17 +83,18 @@ Read the lines; the on-screen action is in brackets. Word count fits 150–160 w
 **S10 — 2:40–2:50 · Slide 5 (learning)**
 "My first S3 backup failed: the app image had no CA bundle. Minimal images hide what's missing — the release pipeline now runs a real S3 check before publishing."
 
-**S11 — 2:50–2:55 · Slide 6 (close)**
+**S11 — 2:50–2:55 · Slides 6–7 (next, close)** — slide 6 is on screen for the last sentence of S10 or skipped if time is short; the spoken close is unchanged.
 "Pgfy. Lightsail, S3, IAM. Cheap enough to experiment, honest about its limits, a way out when you win."
 
-## Slides (six)
+## Slides (seven)
 
 1. **Hook** — `50 databases · $12/month · restores you can verify` (numbers appear one by one).
-2. **Story** — `$240/month · "hosting is on you" · workers every 10 s never sleep` and the Neon arithmetic `0.25 CU × 730 h × $0.106 = $19.34/project`.
+2. **Story** — `$20/month · $240/year for one Postgres · "hosting is on you" · workers every 10 s never sleep` and the Neon arithmetic `0.25 CU × 730 h × $0.106 = $19.34/project`.
 3. **Architecture** — Lightsail box (Caddy → Go app + React → Postgres 18, SQLite state) → S3 bucket (archive + manifest + SHA-256) ← IAM user; `pg_restore` arrow to RDS as the exit.
 4. **Scale and limits** — table: 50 DBs / 100 idle connections / 490 MiB; 10 DBs loaded 943 tx/s and 8,866 reads/s; all 50 writing 962 tx/s; `one node · 24 h RPO · 150 pooled connections`; beside it RDS: `PITR · Multi-AZ · patching · compliance`; cost row: RDS one-per-project $699 · RDS one shared $25.66 · Lightsail managed 2 GB $30 · Pgfy $12.23 (Single-AZ, us-east-1, Sep 2026).
 5. **Learning** — `No CA bundle → TLS to S3 failed → release pipeline runs a real S3 check`.
-6. **Close** — repo URL, `pgfy-a` dashboard URL, "Lightsail · S3 · IAM".
+6. **What's next** — production gate before real workloads; project deletion with a final backup; backup retention cleanup; PgBouncer; alerts; one-click updates; team permissions; second host + S3-compatible storage validation (AlphaVPS + B2).
+7. **Close** — repo URL, `pgfy-a` dashboard URL, "Lightsail · S3 · IAM".
 
 ## OBS
 
