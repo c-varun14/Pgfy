@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { TriangleAlert } from "lucide-react";
 import { api, APIError, setCSRF, type Session, type Settings, type Status } from "./api";
 import { Shell } from "./components/Shell";
-import { PageHeader } from "./components/PageHeader";
-import { Banner, ErrorNotice } from "./components/ui/banner";
+import { ErrorNotice } from "./components/ui/banner";
 import { Skeleton } from "./components/ui/skeleton";
 import { useRoute } from "./router";
 import { AuthPage } from "./pages/Auth";
-import { ProjectsPage } from "./pages/Projects";
-import { ProjectPage } from "./pages/Project";
-import { RecoveryPage } from "./pages/Recovery";
+import { DatabasesPage } from "./pages/Databases";
+import { DatabasePage } from "./pages/Database";
+import { BackupsPage } from "./pages/BackupsPage";
 import { SettingsPage } from "./pages/Settings";
 
 export function App() {
-  const { path, navigate, redirect } = useRoute();
+  const { path, params, navigate, redirect } = useRoute();
   const [session, setSession] = useState<Session | null>(null);
   const [setup, setSetup] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -54,13 +52,9 @@ export function App() {
   const area = projectMatch ? "project" : path === "/backups" || path === "/recovery" ? "backups" : path === "/settings" ? "settings" : "databases";
   return <Shell path={path} session={session} status={status} settings={settings} navigate={navigate} onLogout={() => void logout()}>
     {error && <ErrorNotice message={error} />}
-    {area === "databases" && <>
-      <PageHeader title="Databases" />
-      {status && !status.ready && <Banner tone="warn"><TriangleAlert size={18} /><div><h2>Your server needs attention</h2><p>PostgreSQL isn't responding. Run <code>pgfyctl diagnostics</code> on the server.</p></div></Banner>}
-      <ProjectsPage navigate={navigate} />
-    </>}
-    {area === "project" && <ProjectPage id={projectMatch![1]} session={session} navigate={navigate} />}
-    {area === "backups" && <><PageHeader title="Backups" description="Daily backups of every database to a bucket you own. Restore any of them here — on this server or a new one." /><RecoveryPage navigate={navigate} /></>}
-    {area === "settings" && <><PageHeader title="Settings" />{settings ? <SettingsPage settings={settings} status={status} /> : !error && <Skeleton />}</>}
+    {area === "databases" && <DatabasesPage status={status} navigate={navigate} />}
+    {area === "project" && <DatabasePage id={projectMatch![1]} session={session} tab={params.get("tab")} navigate={navigate} />}
+    {area === "backups" && <BackupsPage navigate={navigate} />}
+    {area === "settings" && <>{settings ? <SettingsPage settings={settings} status={status} /> : !error && <Skeleton />}</>}
   </Shell>;
 }

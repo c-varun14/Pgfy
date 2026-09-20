@@ -23,11 +23,12 @@ export function Button({
   size,
   loading = false,
   asChild = false,
+  disabled,
   ...props
 }: React.ComponentProps<"button"> &
   VariantProps<typeof variants> & { asChild?: boolean; loading?: boolean }) {
   const Component = asChild ? Slot : "button";
   return (
-    <Component className={cn(variants({ variant, size }), className)} aria-busy={loading || undefined} disabled={loading || props.disabled} {...props} />
+    <Component className={cn(variants({ variant, size }), className)} aria-busy={loading || undefined} disabled={loading || disabled} {...props} />
   );
 }
