@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ChevronRight, Database, Plus, TriangleAlert } from "lucide-react";
 import { api, type Manifest, type Project, type Status, type StorageSettings } from "../api";
-import { formatBytes, relativeTime } from "../lib/format";
+import { formatBytes, formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Banner, ErrorNotice } from "../components/ui/banner";
 import { Button } from "../components/ui/button";
@@ -10,6 +10,7 @@ import { EmptyState } from "../components/ui/empty-state";
 import { Field } from "../components/ui/field";
 import { Pill } from "../components/ui/pill";
 import { Skeleton } from "../components/ui/skeleton";
+import { EmptyArt } from "../components/ui/empty-art";
 
 export function databaseStage(project: Project) {
   if (project.failed) return { tone: "bad" as const, label: "Needs attention" };
@@ -37,6 +38,7 @@ export function DatabasesPage({ status, navigate }: { status: Status | null; nav
   }, []);
   const pending = projects?.some((project) => !project.failed && project.stage !== "ready");
   useEffect(() => { if (!pending) return; const timer = setInterval(() => void loadProjects(), 2000); return () => clearInterval(timer); }, [pending]);
+  useEffect(() => { const onKey = (event: KeyboardEvent) => { if (event.key === "n" && !event.metaKey && !event.ctrlKey && !event.altKey && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !creating) { event.preventDefault(); setCreating(true); } }; addEventListener("keydown", onKey); return () => removeEventListener("keydown", onKey); }, [creating]);
 
   async function create(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
@@ -50,15 +52,15 @@ export function DatabasesPage({ status, navigate }: { status: Status | null; nav
   const latest = new Map<string, Manifest>();
   manifests?.forEach((item) => { const current = latest.get(item.project_id); if (!current || Date.parse(item.created_at) > Date.parse(current.created_at)) latest.set(item.project_id, item); });
   return <>
-    <PageHeader title="Databases" actions={<Button onClick={() => setCreating(true)}><Plus size={16} />New database</Button>} />
+    <PageHeader title="Databases" actions={<Button onClick={() => setCreating(true)}><Plus size={16} />New database<kbd>N</kbd></Button>} />
     {status && !status.ready && <Banner tone="warn"><TriangleAlert size={18} /><div><h2>Your server needs attention</h2><p>PostgreSQL isn't responding. Run <code>pgfyctl diagnostics</code> on the server.</p></div></Banner>}
     {projects && projects.length > 0 && storageConfigured === false && <Banner><span>Backups are off — your databases aren't protected against server loss. <button className="link" onClick={() => navigate("/backups")}>Set up backups →</button></span></Banner>}
     {error && <ErrorNotice message={error} />}
-    {projects === null ? !error && <Skeleton lines={4} /> : projects.length === 0 ? <EmptyState icon={<Database size={28} />} title="No databases yet" action={<Button onClick={() => setCreating(true)}><Plus size={16} />New database</Button>}>Create your first database. It will be ready in a few seconds.</EmptyState> :
+    {projects === null ? !error && <div className="database-table"><Skeleton lines={3} className="skeleton-row" /></div> : projects.length === 0 ? <EmptyState icon={<EmptyArt />} title="No databases yet" action={<Button onClick={() => setCreating(true)}><Plus size={16} />New database</Button>}>Create your first database. It will be ready in a few seconds.</EmptyState> :
       <div className="database-table" role="table" aria-label="Databases">
-        <div className="database-row database-head" role="row"><span>Name</span><span>Status</span><span>Size</span><span>Last backup</span><span>Connections</span><span>Created</span><span /></div>
+        <div className="database-row database-head" role="row"><span>Name</span><span>Status</span><span className="num">Size</span><span>Last backup</span><span className="num">Connections</span><span>Created</span><span /></div>
         {projects.map((project) => { const stage = databaseStage(project); const backup = latest.get(project.id); const connections = project.connections_now?.length || 0; return <button type="button" className="database-row" role="row" key={project.id} onClick={() => navigate(`/projects/${project.id}`)}>
-          <strong role="cell">{project.name}</strong><span role="cell"><Pill tone={stage.tone}>{stage.label}</Pill></span><span role="cell" data-label="Size">{project.stage === "ready" ? formatBytes(project.size_bytes) : "—"}</span><span role="cell" data-label="Last backup">{storageConfigured === false ? "Off" : manifests === null ? "—" : backup ? relativeTime(Date.parse(backup.created_at) / 1000) : "Never"}</span><span role="cell" data-label="Connections">{connections ? `${connections} live` : "—"}</span><span role="cell" data-label="Created">{relativeTime(project.created_at)}</span><ChevronRight size={16} aria-hidden="true" />
+          <strong role="cell"><Database size={16} />{project.name}</strong><span role="cell"><Pill tone={stage.tone}>{stage.label}</Pill></span><span role="cell" className="num" data-label="Size">{project.stage === "ready" ? formatBytes(project.size_bytes) : "—"}</span><span role="cell" data-label="Last backup">{storageConfigured === false ? "Off" : manifests === null ? "—" : backup ? <time title={formatDate(Date.parse(backup.created_at) / 1000)}>{relativeTime(Date.parse(backup.created_at) / 1000)}</time> : "Never"}</span><span role="cell" className="num" data-label="Connections">{connections ? `${connections} live` : "—"}</span><span role="cell" data-label="Created"><time title={formatDate(project.created_at)}>{relativeTime(project.created_at)}</time></span><ChevronRight size={16} aria-hidden="true" />
         </button>; })}
       </div>}
     <Dialog open={creating} onClose={() => setCreating(false)} title="New database">

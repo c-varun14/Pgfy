@@ -1,0 +1,13 @@
+@keyframes pulse { 50% { opacity:.35; transform:scale(.8); } }
+@keyframes shimmer { to { background-position:-200% 0; } }
+@keyframes spin { to { transform:rotate(360deg); } }
+@keyframes enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes pop { 0% { transform: scale(0.6); opacity: 0; } 60% { transform: scale(1.12); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+@keyframes soft-pulse { 50% { box-shadow: 0 0 0 5px var(--good-soft); } }
+.page-enter { animation: enter 0.18s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+html, .card, .sidebar, .sidebar-bottom, .database-table, .code-block, .dialog-panel { transition: background-color 0.25s, border-color 0.25s, color 0.25s; }
+.pop { animation: pop 0.25s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.button[data-copied] { color: var(--good); }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.01ms!important; animation-iteration-count:1!important; transition-duration:.01ms!important; } }

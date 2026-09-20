@@ -13,7 +13,7 @@ function readTheme(): ThemePreference {
 function applyTheme(preference: ThemePreference) {
   const resolved = preference === "system" ? (matchMedia(query).matches ? "dark" : "light") : preference;
   document.documentElement.dataset.theme = resolved;
-  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#0e1311" : "#f5f7f5");
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#0b0d0c" : "#f7f8f7");
 }
 
 export function useTheme() {

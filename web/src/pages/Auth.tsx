@@ -4,10 +4,11 @@ import { api } from "../api";
 import { ErrorNotice } from "../components/ui/banner";
 import { Button } from "../components/ui/button";
 import { Field } from "../components/ui/field";
+import { Brand, BrandMark } from "../components/Sidebar";
 
 export function AuthPage({ setup, error, onRetry, onSuccess }: { setup: boolean; error: string; onRetry: () => void; onSuccess: () => Promise<void> }) {
-  return <div className="auth-layout"><aside className="auth-aside"><div className="auth-brand">pgfy<span>.</span></div><div><h1>Self-hosted PostgreSQL that just works</h1><ul><li><Check size={17} />Databases in seconds</li><li><Check size={17} />Daily backups to your own S3</li><li><Check size={17} />Restore on any server</li></ul></div><span className="aside-footer">Your data stays on your server.</span></aside>
-    <main className="auth-main"><div className="auth-card"><h1>{setup ? "Create your admin account" : "Sign in"}</h1><p>{setup ? "Set up the administrator for this Pgfy server." : "Use your administrator account to continue."}</p>{error && <><ErrorNotice message={error} /><Button variant="secondary" onClick={onRetry}>Retry connection</Button></>}<AuthForm setup={setup} onSuccess={onSuccess} /><p className="fine-print"><ShieldCheck size={15} />{location.protocol === "https:" ? "Connected over HTTPS" : "HTTP access — use only through your SSH tunnel"}</p></div></main>
+  return <div className="auth-layout"><aside className="auth-aside"><div className="auth-brand"><Brand /></div><div><h1>Self-hosted PostgreSQL that just works</h1><ul><li><Check size={17} />Databases in seconds</li><li><Check size={17} />Daily backups to your own S3</li><li><Check size={17} />Restore on any server</li></ul></div><span className="aside-footer">Your data stays on your server.</span></aside>
+    <main className="auth-main"><div className="auth-card"><BrandMark size={34} /><h1>{setup ? "Create your admin account" : "Sign in"}</h1><p>{setup ? "Set up the administrator for this Pgfy server." : "Use your administrator account to continue."}</p>{error && <><ErrorNotice message={error} /><Button variant="secondary" onClick={onRetry}>Retry connection</Button></>}<AuthForm setup={setup} onSuccess={onSuccess} /><p className="fine-print"><ShieldCheck size={15} />{location.protocol === "https:" ? "Connected over HTTPS" : "HTTP access — use only through your SSH tunnel"}</p></div></main>
   </div>;
 }
 

@@ -1,1 +1,1 @@
-export function Skeleton({ lines = 3 }: { lines?: number }) { return <div className="skeleton" role="status" aria-label="Loading">{Array.from({ length: lines }, (_, index) => <span key={index} />)}</div>; }
+export function Skeleton({ lines = 3, className = "" }: { lines?: number; className?: string }) { return <div className={"skeleton " + className} role="status" aria-label="Loading">{Array.from({ length: lines }, (_, index) => <span key={index} />)}</div>; }

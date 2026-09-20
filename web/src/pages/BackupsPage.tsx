@@ -1,12 +1,13 @@
 import { Archive, Database, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type Job, type Manifest, type StorageSettings } from "../api";
-import { formatBytes, formatDate, STAGE_LABELS } from "../lib/format";
+import { formatBytes, formatDate, formatDateTime, relativeTime, STAGE_LABELS } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { ErrorNotice } from "../components/ui/banner";
 import { Button } from "../components/ui/button";
 import { Card, CardHeader } from "../components/ui/card";
 import { EmptyState } from "../components/ui/empty-state";
+import { EmptyArt } from "../components/ui/empty-art";
 import { Pill } from "../components/ui/pill";
 import { Skeleton } from "../components/ui/skeleton";
 import { StorageForm, EMPTY_STORAGE } from "./backups/StorageForm";
@@ -33,7 +34,7 @@ export function BackupsPage({ navigate }: { navigate: (to: string) => void }) {
         {discovery.state === "storage_error" && <ErrorNotice message={`Backups could not be listed: ${discovery.error || "Check your storage settings."}`} />}
         {showForm && <StorageForm initial={storage.settings} configured={storage.configured} onSaved={(settings) => { setStorage({ configured: true, settings }); setEditing(false); setError(""); void load(); }} />}
       </Card>
-      {storage.configured && discovery.state !== "storage_not_configured" && <Card><CardHeader title="All backups" />{discovery.backups.length === 0 ? <EmptyState icon={<Archive size={24} />} title="No backups yet">Your first daily backup will appear here.</EmptyState> : <div className="backup-groups">{[...groups.entries()].map(([name, backups]) => <section key={name} className="backup-group"><h3><Database size={16} />{name}</h3><div className="backup-rows">{backups.map((backup) => <div className="backup-row" key={backup.manifest_key} title={`sha256 ${backup.sha256}`}><span><strong>{formatDate(Date.parse(backup.created_at) / 1000)}</strong><small>{formatBytes(backup.size_bytes)} · {backup.tables.length} table{backup.tables.length === 1 ? "" : "s"} · PostgreSQL {backup.postgres_version.split(" ")[0]}{discovery.installation_id && backup.installation_id !== discovery.installation_id ? " · from another server" : ""}</small></span><Button variant="secondary" size="sm" onClick={() => setSelected(backup)}><RotateCcw size={14} />Restore</Button></div>)}</div></section>)}</div>}</Card>}
+      {storage.configured && discovery.state !== "storage_not_configured" && <Card><CardHeader title="All backups" />{discovery.backups.length === 0 ? <EmptyState icon={<EmptyArt />} title="No backups yet">Your first daily backup will appear here.</EmptyState> : <div className="backup-groups">{[...groups.entries()].map(([name, backups]) => <section key={name} className="backup-group"><h3><Database size={16} />{name}</h3><div className="backup-rows">{backups.map((backup) => { const seconds = Date.parse(backup.created_at) / 1000; return <div className="backup-row" key={backup.manifest_key} title={`sha256 ${backup.sha256}`}><span><strong><time title={formatDate(seconds)}>{relativeTime(seconds)}</time></strong><small>{formatDateTime(seconds)} · {formatBytes(backup.size_bytes)} · {backup.tables.length} table{backup.tables.length === 1 ? "" : "s"} · PostgreSQL {backup.postgres_version.split(" ")[0]}{discovery.installation_id && backup.installation_id !== discovery.installation_id ? " · from another server" : ""}</small></span><Button variant="secondary" size="sm" onClick={() => setSelected(backup)}><RotateCcw size={14} />Restore</Button></div>; })}</div></section>)}</div>}</Card>}
       {discovery.restores && discovery.restores.length > 0 && <details className="previous-restores"><summary>Previous restores</summary><Card><div className="job-rows">{discovery.restores.map((job) => <div className="job-row" key={job.id}><Pill tone={jobTone(job)}>{jobLabel(job)}</Pill><span><strong>{formatDate(job.created_at)}</strong><small>{job.error || (job.result.verified ? "All verification checks passed" : STAGE_LABELS[job.stage] || job.stage)}</small></span>{job.result.project_id && job.state === "succeeded" && <Button variant="ghost" size="sm" onClick={() => navigate(`/projects/${job.result.project_id}`)}>Open</Button>}</div>)}</div></Card></details>}
     </>}
     <RestoreDialog manifest={selected} open={!!selected} busy={discovery?.busy} onClose={() => setSelected(null)} navigate={navigate} onComplete={() => void load()} />

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, APIError, setCSRF, type Session, type Settings, type Status } from "./api";
 import { Shell } from "./components/Shell";
+import { BrandMark } from "./components/Sidebar";
 import { ErrorNotice } from "./components/ui/banner";
 import { Skeleton } from "./components/ui/skeleton";
 import { useRoute } from "./router";
@@ -45,7 +46,7 @@ export function App() {
     catch (failure) { setError((failure as Error).message); }
   }
 
-  if (loading) return <div className="app-loading"><strong>pgfy.</strong><Skeleton lines={2} /></div>;
+  if (loading) return <div className="app-loading"><BrandMark size={40} /><span className="loading-text">Connecting to your server…</span></div>;
   if (!session) return <AuthPage setup={setup} error={error} onRetry={() => void load()} onSuccess={load} />;
 
   const projectMatch = path.match(/^\/projects\/([A-Za-z0-9_-]+)$/);
