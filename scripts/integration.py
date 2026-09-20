@@ -307,7 +307,7 @@ def main():
             assert request("/health/ready")[0] == 503
             assert request("/api/v1/setup")[0] == 503
             assert request("/")[0] == 200
-            assert not (directory / "data/sqlite/pgfy.db").exists()
+            run([*helper, "test ! -e /fixture/data/sqlite/pgfy.db"])
             compose("stop", "application")
             run([*helper, "mv /fixture/data/sqlite/pgfy.db.saved /fixture/data/sqlite/pgfy.db"])
             compose("start", "application")
