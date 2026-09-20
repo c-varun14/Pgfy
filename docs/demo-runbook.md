@@ -10,13 +10,13 @@ One take per segment, recorded with OBS while sharing the whole screen and talki
 | Projects on A | Shop (3 orders), Blog (2), Quiz app (2), Client CRM (3); each backed up once to S3 |
 | Shop allowlist | the workstation's public IPv4 only (`/32`); check it on the Access tab before recording — mobile ISPs change addresses |
 | Backup bucket | `pgfy-backups-418638389257`, prefix `pgfy/demo`, SSE-S3, IAM user `pgfy-backups` (bucket-only policy) |
-| Static IP for B | `pgfy-b-ip` = `184.192.127.28`, allocated and unattached |
+| Server B | `pgfy-b`, Lightsail $12 bundle, static IP `184.192.127.28`, v0.3.0 installed (68 s), **no administrator yet** — it stays empty until the recording. Dashboard `https://pgfy-b.webbywasp.com` once the DNS record exists (until then tunnel mode) |
 | Credentials | `~/pgfy-a-admin.txt` on the workstation (mode 0600): dashboard login, storage keys, project URLs. Never on screen. |
 | Demo app | `cd ~/pgfy/demo && export DATABASE_URL='…' && node demo.js read` / `node demo.js write "…"` |
 
 Do this once, before recording:
 
-1. Add a Cloudflare **A record** `pgfy-b.webbywasp.com → 184.192.127.28` (DNS only, no proxy). Let's Encrypt needs it resolvable when the installer runs.
+1. Add a Cloudflare **A record** `pgfy-b.webbywasp.com → 184.192.127.28` (DNS only, no proxy), then have B switched to HTTPS: `sudo /opt/firstcommit/pgfyctl hostname pgfy-b.webbywasp.com` on B (already scripted; Let's Encrypt needs the record resolvable first).
 2. Open a **clean browser profile** signed in to the AWS console (Lightsail + S3) and to the A dashboard. Hide the bookmarks bar, zoom 125 %.
 3. Terminal: font 18–20 pt, dark theme, prompt shortened, `cd ~/pgfy/demo` and `export DATABASE_URL` for Shop already done in one tab; a second tab for SSH.
 4. Confirm your public IP matches Shop's allowlist: `curl -4 https://checkip.amazonaws.com`.
@@ -24,67 +24,67 @@ Do this once, before recording:
 
 ## Server B on camera (the guide)
 
-Recorded in real time, sped up in the edit to about 15 seconds with the caption "sped up".
+B is already created and installed; nothing on this list is destructive, and everything is real time.
 
-1. Lightsail console → **Create instance** → Linux/Unix → OS only → **Ubuntu 24.04 LTS** → $12 plan → key pair `firstcommit-lightsail` → name `pgfy-b` → Create. (About 20 s to "Running".)
-2. Instance → **Networking** → attach static IP `pgfy-b-ip` → IPv4 firewall: add **HTTPS 443** and **Custom TCP 5432**; restrict SSH 22 to your IP if you like. (80 and 22 exist by default.)
-3. Terminal tab 2:
+1. **Cloudflare → DNS**: show the A record `pgfy-b.webbywasp.com → 184.192.127.28` (DNS only).
+2. **Lightsail console → Instances**: `pgfy-a` and `pgfy-b`, both $12 Ubuntu 24.04; open `pgfy-b` → Networking: static IP attached, firewall 80/443/5432 open, 22 restricted.
+3. **Terminal tab 2** — SSH and show the install command (it is idempotent: on an installed host it re-verifies and prints the HTTPS address; the first run took 68 s — say so):
    ```sh
    ssh -i ~/.ssh/firstcommit-lightsail-rsa ubuntu@184.192.127.28
-   curl -fsSL https://github.com/c-varun14/Pgfy/releases/latest/download/bootstrap.sh -o bootstrap.sh
    sudo bash bootstrap.sh --hostname pgfy-b.webbywasp.com
+   sudo /opt/firstcommit/pgfyctl setup-token
    ```
-   Measured: 63 s on a fresh instance. The last lines print the HTTPS address and the **setup token** — the token is a secret; on camera, scroll it off screen or cover it in the edit. It expires in 30 minutes and is consumed when the admin is created.
-4. Browser: open `https://pgfy-b.webbywasp.com`, paste the token, create the administrator (any email, 15+ character password).
+   The token is a secret: keep the terminal scrolled so the token line is at the very bottom and cover it in the edit, or copy it with the terminal off screen. It expires in 30 minutes and is consumed when the admin is created. (`setup-token` refuses while an unexpired token exists; the one from installation has long expired.)
+4. **Browser**: `https://pgfy-b.webbywasp.com` → paste the token, email, a 15+ character password → Create administrator.
 5. **Settings → Backup storage**: endpoint `https://s3.us-east-1.amazonaws.com`, region `us-east-1`, bucket `pgfy-backups-418638389257`, prefix `pgfy/demo`, access key and secret from the credentials file → Save → **Check storage** (four green steps, about 1 s).
-6. **Recovery**: the backups of all four projects appear; pick the newest **Shop** → Restore as `Shop` → the job shows the checks: rows 3/3, ownership, permissions (about 1 s).
+6. **Recovery**: backups of all four projects appear; pick the newest **Shop** (the one taken while frozen) → Restore as `Shop` → the job shows rows 3/3, ownership, permissions (about 1 s).
 7. Project page → **Copy connection URL** → terminal tab 1: `export DATABASE_URL='<new url>'` → `node demo.js read` (three orders) → `node demo.js write "Order #1004 — placed on server B"`.
-8. Back on A: **Resume writes** on Shop (or leave it frozen to show the old copy is untouched — say which).
+8. Back on A: **Resume writes** on Shop, or leave it frozen and say the old copy is untouched.
 
-If anything fails: `sudo /opt/firstcommit/pgfyctl setup-token` reissues a token only after the previous one expires; the storage check names the failing step; the restore job records the failing check. Rehearse once without recording.
+If anything fails: the storage check names the failing step; the restore job records the failing check; `pgfyctl diagnostics` on the host. Rehearse once without recording.
 
 ## Segment list, script and timings (2:55)
 
-Read the lines; the on-screen action is in brackets. Word count fits 150–160 words per minute without rushing.
+Read the lines; the on-screen action is in brackets. 403 words ≈ 156 s of speech at 155 words per minute; the demo segments (S4, S6, S7) are spoken over the clicks, which is where the remaining time lives.
 
-**S1 — 0:00–0:12 · Slide 1 (hook)**
+**S1 — 0:00–0:10 · Slide 1 (hook)**
 "Fifty small databases. One twelve-dollar server on AWS. Backups to S3, and restores that verify themselves. This is Pgfy."
 
-**S2 — 0:12–0:50 · Slide 2 (story)**
-"I run a small agency. A client told me hosting was on us. Twenty dollars a month for one Postgres — two-forty a year — on top of AI bills and VPS bills, for an app with a tiny audience. Dokploy spoiled me with one-click self-hosting, but its databases weren't managed the way I needed. RDS's own docs say you can run many databases in one instance — and then leave you to create every role, password and backup by hand. I wanted that, with one click and real backups. Neon? My apps run workers every ten seconds, so the database never sleeps: nineteen dollars per project, always on. In the AI era we all ship niche apps for small audiences — many small databases, none of them big. So I built Pgfy."
+**S2 — 0:10–0:42 · Slide 2 (story)**
+"I run a small agency. A client told me hosting was on us: twenty dollars a month for one Postgres — two-forty a year — on top of AI and VPS bills. Dokploy gave me one-click self-hosting, but not managed databases. RDS says run many databases in one instance, then leaves every role, password and backup to you. Neon never sleeps when your workers run every ten seconds. I wanted one server I own, a database per project in one click, backups that prove they restore. So I built Pgfy."
 
-**S3 — 0:50–1:05 · AWS console, then slide 3 (architecture)**
-[Lightsail: `pgfy-a` running; S3: the bucket, `pgfy/demo/backups/…/manifest.json`; IAM user `pgfy-backups`.]
-"Built on AWS: Lightsail for compute, an S3 bucket holding the backups and their manifests, an IAM user scoped to that bucket. The stack: one Go binary with an embedded React dashboard, Caddy, Postgres 18 — Docker Compose on Ubuntu."
+**S3 — 0:42–0:55 · AWS console, then slide 3 (architecture)**
+[Lightsail: `pgfy-a` and `pgfy-b`; S3: the bucket, `pgfy/demo/backups/…/manifest.json`; IAM user `pgfy-backups`.]
+"Built on AWS: Lightsail for compute, S3 for the backups and their manifests, an IAM user scoped to that bucket. One Go binary with an embedded React dashboard, Caddy, Postgres 18 — Compose on Ubuntu."
 
-**S4 — 1:05–1:25 · Dashboard A + terminal**
+**S4 — 0:55–1:15 · Dashboard A + terminal**
 [Databases list: four projects. Open Shop → Access tab shows one allowed address. Terminal: `node demo.js read` → three orders. Access tab: replace the address with `203.0.113.0/24` → Save → `node demo.js read` → `pg_hba.conf rejects connection…` → put your address back.]
 "Server A, live: four projects, each its own database, restricted role, TLS-only. This app's address is allowlisted — it reads its three orders. Take the address off the list — Postgres itself refuses it."
 
-**S5 — 1:25–1:40 · Lightsail console + terminal (sped up, caption "63 s, sped up")**
-[Steps 1–4 of the guide.]
-"One client's project took off; it deserves its own box. Ubuntu, twelve-dollar plan, one command. A minute later: a dashboard with a real certificate."
+**S5 — 1:15–1:30 · Cloudflare DNS → Lightsail console → terminal**
+[Guide steps 1–3: the A record, the two instances, the install command re-verifying, `setup-token`.]
+"One client's project took off; it deserves its own box. Its DNS record, its Lightsail instance, and the one command that installed it — sixty-eight seconds from a blank Ubuntu to a dashboard with a real certificate."
 
-**S6 — 1:40–1:55 · Dashboard A + terminal**
+**S6 — 1:30–1:45 · Dashboard A + terminal**
 [Shop → **Freeze writes** → confirm. Terminal: `node demo.js write "Order #1004"` → `Failed: cannot execute INSERT in a read-only transaction`; `node demo.js read` → three orders. **Back up now** → Backups tab: succeeded, SHA-256.]
 "Freeze writes on that project. The app still reads — writes are refused. Back up: two seconds; archive, manifest, checksum in S3."
 
-**S7 — 1:55–2:15 · Dashboard B** (the winning beat — big fonts, slow cursor)
-[Steps 5–6 of the guide.]
+**S7 — 1:45–2:05 · Dashboard B** (the winning beat — big fonts, slow cursor)
+[Guide steps 4–6.]
 "Server B is empty; it gets only the bucket credentials. Storage check: four steps green. It discovers the backups — Shop, seconds old. Restore: one second — and it doesn't just say success: row counts three of three, ownership, permissions, verified."
 
-**S8 — 2:15–2:25 · Terminal**
-[Step 7 of the guide.]
+**S8 — 2:05–2:15 · Terminal**
+[Guide step 7.]
 "New connection string. Three orders back, a fourth written. Under five minutes; the other three projects never noticed. Server dies at two a.m.? Identical flow."
 
-**S9 — 2:25–2:40 · Slide 4 (scale and growth)**
-"How far does twelve dollars go? Fifty databases, a hundred pooled connections, under five hundred megabytes — all fifty writing at once, about a thousand transactions a second. And it grows with you: when one app takes off, it gets its own Pgfy box — twenty-four dollars for four gigs, forty-four for eight — restored in under five minutes, the same flow you just watched. The day you want managed failover and point-in-time recovery, the backup is a plain pg_dump: one pg_restore into RDS. Every rung is yours to choose."
+**S9 — 2:15–2:37 · Slide 4 (scale and growth)**
+"How far does twelve dollars go? Fifty databases, a hundred pooled connections, under five hundred megabytes. And it grows with you: when an app takes off it gets its own Pgfy box — twenty-four dollars for four gigs, forty-four for eight — restored in five minutes. Want managed failover? One pg_restore into RDS."
 
-**S10 — 2:40–2:50 · Slide 5 (learning)**
-"My first S3 backup failed: the app image had no CA bundle. Minimal images hide what's missing — the release pipeline now runs a real S3 check before publishing."
+**S10 — 2:37–2:47 · Slide 5 (learning)**
+"My first S3 backup failed: the app image had no CA bundle. Minimal images hide what's missing — so the release pipeline now runs a real S3 check."
 
-**S11 — 2:50–2:55 · Slides 6–7 (next, close)** — slide 6 is on screen for the last sentence of S10 or skipped if time is short; the spoken close is unchanged.
-"Pgfy: every project's database on one server you own, with backups that prove they restore — and it grows with you. Lightsail, S3, IAM. The repo is in the description."
+**S11 — 2:47–2:55 · Slides 6–7 (next, close)** — slide 6 shows for a beat, then the close.
+"Pgfy: every project's database on one server you own, with backups that prove they restore. Repo in the description."
 
 ## Slides (seven)
 
@@ -102,5 +102,5 @@ Read the lines; the on-screen action is in brackets. Word count fits 150–160 w
 - Settings → Output: recording format **MKV** (survives a crash), remux to MP4 afterwards (File → Remux Recordings); 1920×1080, 30 fps, CRF/CQ 20.
 - Hotkeys: Start/Stop recording on one key; pause between segments rather than stopping.
 - Before pressing record: notifications off, second monitor off or excluded, terminal cleared, browser on the first tab, slide 1 up.
-- Record each segment separately (S1–S11), leave two seconds of silence at both ends, and cut in any editor (Kdenlive, Shotcut, DaVinci). Add captions "sped up" on S5 and "real time" on S6–S8. Keep the final cut under 3:00; the target is 2:55.
+- Record each segment separately (S1–S11), leave two seconds of silence at both ends, and cut in any editor (Kdenlive, Shotcut, DaVinci). Nothing is sped up; caption S5 "first install: 68 s" if you re-run the installer on camera, and "real time" on S6–S8. Keep the final cut under 3:00; the target is 2:55.
 - Never show: the setup token, the storage secret key, the credentials file, or a connection URL long enough to read (the app reads it from the environment).
