@@ -10,13 +10,13 @@ One take per segment, recorded with OBS while sharing the whole screen and talki
 | Projects on A | Shop (3 orders), Blog (2), Quiz app (2), Client CRM (3); each backed up once to S3 |
 | Shop allowlist | the workstation's public IPv4 only (`/32`); check it on the Access tab before recording — mobile ISPs change addresses |
 | Backup bucket | `pgfy-backups-418638389257`, prefix `pgfy/demo`, SSE-S3, IAM user `pgfy-backups` (bucket-only policy) |
-| Server B | `pgfy-b`, Lightsail $12 bundle, static IP `184.192.127.28`, v0.3.0 installed (68 s), **no administrator yet** — it stays empty until the recording. Dashboard `https://pgfy-b.webbywasp.com` once the DNS record exists (until then tunnel mode) |
+| Server B | `pgfy-b`, Lightsail $12 bundle, Ubuntu 24.04, static IP `184.192.127.28` attached, firewall 80/443/5432 open — **Pgfy not installed**; the installer runs on camera (Docker engine is already present, so the run is a little quicker than a bare box) |
 | Credentials | `~/pgfy-a-admin.txt` on the workstation (mode 0600): dashboard login, storage keys, project URLs. Never on screen. |
 | Demo app | `cd ~/pgfy/demo && export DATABASE_URL='…' && node demo.js read` / `node demo.js write "…"` |
 
 Do this once, before recording:
 
-1. Add a Cloudflare **A record** `pgfy-b.webbywasp.com → 184.192.127.28` (DNS only, no proxy), then have B switched to HTTPS: `sudo /opt/firstcommit/pgfyctl hostname pgfy-b.webbywasp.com` on B (already scripted; Let's Encrypt needs the record resolvable first).
+1. Add a Cloudflare **A record** `pgfy-b.webbywasp.com → 184.192.127.28` (DNS only, grey cloud). Do it at least a few minutes before recording: Let's Encrypt must resolve it when the installer runs. Check with `getent hosts pgfy-b.webbywasp.com`.
 2. Open a **clean browser profile** signed in to the AWS console (Lightsail + S3) and to the A dashboard. Hide the bookmarks bar, zoom 125 %.
 3. Terminal: font 18–20 pt, dark theme, prompt shortened, `cd ~/pgfy/demo` and `export DATABASE_URL` for Shop already done in one tab; a second tab for SSH.
 4. Confirm your public IP matches Shop's allowlist: `curl -4 https://checkip.amazonaws.com`.
@@ -24,24 +24,24 @@ Do this once, before recording:
 
 ## Server B on camera (the guide)
 
-B is already created and installed; nothing on this list is destructive, and everything is real time.
+The instance exists (created in the console before recording, static IP attached, firewall open). Pgfy is **not** installed on it. On camera the flow is exactly the real one: DNS record → SSH → one command → token → dashboard. Full generic instructions: [installation.md](installation.md); Lightsail specifics: [lightsail.md](lightsail.md).
 
 1. **Cloudflare → DNS**: show the A record `pgfy-b.webbywasp.com → 184.192.127.28` (DNS only).
 2. **Lightsail console → Instances**: `pgfy-a` and `pgfy-b`, both $12 Ubuntu 24.04; open `pgfy-b` → Networking: static IP attached, firewall 80/443/5432 open, 22 restricted.
-3. **Terminal tab 2** — SSH and show the install command (it is idempotent: on an installed host it re-verifies and prints the HTTPS address; the first run took 68 s — say so):
+3. **Terminal tab 2** — SSH in and run the installer (about a minute; cut or speed up in the edit with the caption "≈1 min"):
    ```sh
    ssh -i ~/.ssh/firstcommit-lightsail-rsa ubuntu@184.192.127.28
+   curl -fsSL https://github.com/c-varun14/Pgfy/releases/latest/download/bootstrap.sh -o bootstrap.sh
    sudo bash bootstrap.sh --hostname pgfy-b.webbywasp.com
-   sudo /opt/firstcommit/pgfyctl setup-token
    ```
-   The token is a secret: keep the terminal scrolled so the token line is at the very bottom and cover it in the edit, or copy it with the terminal off screen. It expires in 30 minutes and is consumed when the admin is created. (`setup-token` refuses while an unexpired token exists; the one from installation has long expired.)
+   It pulls the pinned images, starts Caddy + Pgfy + PostgreSQL, obtains the Let's Encrypt certificate, delivers it to PostgreSQL, and ends with `Installation verified: https://pgfy-b.webbywasp.com` followed by the **setup token** on its own line. The token is a secret: keep it as the last line of the terminal and cover it in the edit, or copy it with the terminal off screen. It expires in 30 minutes and is consumed when the admin is created.
 4. **Browser**: `https://pgfy-b.webbywasp.com` → paste the token, email, a 15+ character password → Create administrator.
 5. **Settings → Backup storage**: endpoint `https://s3.us-east-1.amazonaws.com`, region `us-east-1`, bucket `pgfy-backups-418638389257`, prefix `pgfy/demo`, access key and secret from the credentials file → Save → **Check storage** (four green steps, about 1 s).
 6. **Recovery**: backups of all four projects appear; pick the newest **Shop** (the one taken while frozen) → Restore as `Shop` → the job shows rows 3/3, ownership, permissions (about 1 s).
 7. Project page → **Copy connection URL** → terminal tab 1: `export DATABASE_URL='<new url>'` → `node demo.js read` (three orders) → `node demo.js write "Order #1004 — placed on server B"`.
 8. Back on A: **Resume writes** on Shop, or leave it frozen and say the old copy is untouched.
 
-If anything fails: the storage check names the failing step; the restore job records the failing check; `pgfyctl diagnostics` on the host. Rehearse once without recording.
+If the certificate step fails, the installer says so: check the DNS record resolves to `184.192.127.28` and that 80/443 are open, then re-run the same command (reruns are safe). If the token expires before you use it: `sudo /opt/firstcommit/pgfyctl setup-token`. The storage check names a failing step; the restore job records a failing check; `sudo /opt/firstcommit/pgfyctl diagnostics` for the host. Rehearse once without recording — to reset B to bare again afterwards, ask me (containers, volumes, images and `/opt/firstcommit` are removed; the instance, IP and firewall stay).
 
 ## Segment list, script and timings (2:55)
 
@@ -61,9 +61,9 @@ Read the lines; the on-screen action is in brackets. 403 words ≈ 156 s of spee
 [Databases list: four projects. Open Shop → Access tab shows one allowed address. Terminal: `node demo.js read` → three orders. Access tab: replace the address with `203.0.113.0/24` → Save → `node demo.js read` → `pg_hba.conf rejects connection…` → put your address back.]
 "Server A, live: four projects, each its own database, restricted role, TLS-only. This app's address is allowlisted — it reads its three orders. Take the address off the list — Postgres itself refuses it."
 
-**S5 — 1:15–1:30 · Cloudflare DNS → Lightsail console → terminal**
-[Guide steps 1–3: the A record, the two instances, the install command re-verifying, `setup-token`.]
-"One client's project took off; it deserves its own box. Its DNS record, its Lightsail instance, and the one command that installed it — sixty-eight seconds from a blank Ubuntu to a dashboard with a real certificate."
+**S5 — 1:15–1:30 · Cloudflare DNS → Lightsail console → terminal (install cut to ~10 s in the edit, caption "≈1 min")**
+[Guide steps 1–3: the A record, the two instances, the install command running to `Installation verified`.]
+"One client's project took off; it deserves its own box. A DNS record, a twelve-dollar Lightsail instance, and one command — about a minute later, a dashboard with a real certificate."
 
 **S6 — 1:30–1:45 · Dashboard A + terminal**
 [Shop → **Freeze writes** → confirm. Terminal: `node demo.js write "Order #1004"` → `Failed: cannot execute INSERT in a read-only transaction`; `node demo.js read` → three orders. **Back up now** → Backups tab: succeeded, SHA-256.]
@@ -102,5 +102,5 @@ Read the lines; the on-screen action is in brackets. 403 words ≈ 156 s of spee
 - Settings → Output: recording format **MKV** (survives a crash), remux to MP4 afterwards (File → Remux Recordings); 1920×1080, 30 fps, CRF/CQ 20.
 - Hotkeys: Start/Stop recording on one key; pause between segments rather than stopping.
 - Before pressing record: notifications off, second monitor off or excluded, terminal cleared, browser on the first tab, slide 1 up.
-- Record each segment separately (S1–S11), leave two seconds of silence at both ends, and cut in any editor (Kdenlive, Shotcut, DaVinci). Nothing is sped up; caption S5 "first install: 68 s" if you re-run the installer on camera, and "real time" on S6–S8. Keep the final cut under 3:00; the target is 2:55.
+- Record each segment separately (S1–S11), leave two seconds of silence at both ends, and cut in any editor (Kdenlive, Shotcut, DaVinci). Only the install in S5 is cut down (caption "≈1 min"); caption "real time" on S6–S8. Keep the final cut under 3:00; the target is 2:55.
 - Never show: the setup token, the storage secret key, the credentials file, or a connection URL long enough to read (the app reads it from the environment).
