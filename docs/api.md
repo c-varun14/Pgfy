@@ -42,7 +42,7 @@ AES-256-GCM recoverable-secret encryption uses a separately mounted 32-byte key,
 
 ## Projects and access
 
-Project names are 1–64 letters, digits, spaces, dots, dashes, or underscores. Database and role names are generated (`app_<12 hex>`), passwords are 32 random bytes. Provisioning is recorded stage by stage (`identity_persisted → role_created → database_created → ready`) and resumes after interruption; a role or database that already exists with different attributes marks the project failed with the reason.
+Project names are 1–64 letters, digits, spaces, dots, dashes, underscores, or parentheses. Database and role names are generated (`app_<12 hex>`), passwords are 32 random bytes. Provisioning is recorded stage by stage (`identity_persisted → role_created → database_created → ready`) and resumes after interruption; a role or database that already exists with different attributes marks the project failed with the reason.
 
 The management connection uses the non-superuser `pgfy_mgmt` role (CREATEDB/CREATEROLE only). Project roles are `NOSUPERUSER NOCREATEDB NOCREATEROLE` with a connection limit; every project database revokes `PUBLIC` privileges so other projects cannot connect.
 

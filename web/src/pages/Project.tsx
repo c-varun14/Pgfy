@@ -194,7 +194,7 @@ function ConnectionPanel({ project, access }: { project: Project; access: Databa
       </div>
       {access.mode === "tunnel" && (
         <>
-          <p className="muted small">This installation has no public address. Forward the database port through SSH first, then connect to localhost.</p>
+          <p className="muted small">This installation has no public address. Forward the database port through SSH first, then connect to localhost; the tunnel encrypts the connection, so the URL uses <code>sslmode=disable</code>.</p>
           <CodeBlock label="On your computer" value="ssh -N -L 5432:127.0.0.1:5432 user@your-server" />
         </>
       )}
