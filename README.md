@@ -13,6 +13,7 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 - One-command install with HTTPS-first dashboard access, single-admin setup, sessions, CSRF, rate limits.
 - Projects: one name creates a database, a restricted role and a strong password; resumable provisioning with honest failure states and retry.
 - Connection details with `sslmode=verify-full`, driver snippets, an SSH-tunnel path, and an observed connection check from the application environment.
+- Freeze writes per project (reads continue, writes are rejected, sessions reconnect read-only) so a backup taken before moving a database is complete.
 - Database TLS with the dashboard certificate delivered to PostgreSQL by `pgfyctl sync-db-cert` (daily timer); per-project allowed-address rules applied and verified through PostgreSQL's own parser and reload; TLS-only remote access; cross-project isolation.
 - Backups to any S3-compatible bucket configured in Settings: storage check, manual and daily backups, manifests published last, durable one-at-a-time jobs that survive browser closure and report restarts as interrupted.
 - Recovery on a fresh install from the bucket alone: checksum, version compatibility, restore into a new project, named verification checks, credential handoff. See the [recovery runbook](docs/recovery-runbook.md).

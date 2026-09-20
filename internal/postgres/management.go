@@ -127,6 +127,37 @@ func (m *Management) EnsureDatabase(ctx context.Context, name, owner string) err
 	return e
 }
 
+// SetWritesFrozen makes new sessions of the project role read-only by default
+// (or resets that) and ends its current sessions so the change takes effect at
+// once. pgfy_mgmt holds ADMIN OPTION on roles it created and inherits their
+// membership, which is what ALTER ROLE and pg_terminate_backend require. The
+// freeze is cooperative: a client may still SET transaction_read_only = off.
+func (m *Management) SetWritesFrozen(ctx context.Context, database, role string, frozen bool) error {
+	if !ValidName(database) || !ValidName(role) {
+		return errors.New("invalid project identity")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	statement := "ALTER ROLE %s RESET default_transaction_read_only"
+	if frozen {
+		statement = "ALTER ROLE %s SET default_transaction_read_only = on"
+	}
+	if _, e := m.Pool.Exec(ctx, fmt.Sprintf(statement, pgx.Identifier{role}.Sanitize())); e != nil {
+		return e
+	}
+	return m.TerminateSessions(ctx, database, role)
+}
+
+// TerminateSessions ends every client session of one project role on its
+// database; pooled applications reconnect and pick up the role's settings.
+func (m *Management) TerminateSessions(ctx context.Context, database, role string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, e := m.Pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		WHERE datname=$1 AND usename=$2 AND backend_type='client backend' AND pid<>pg_backend_pid()`, database, role)
+	return e
+}
+
 type Connection struct {
 	ClientAddr      string    `json:"client_addr"`
 	TLS             bool      `json:"tls"`

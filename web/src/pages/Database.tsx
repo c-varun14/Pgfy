@@ -1,10 +1,11 @@
-import { ArrowLeft, Archive, Copy } from "lucide-react";
+import { ArrowLeft, Archive, Copy, Play, Snowflake } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, type Credentials, type DatabaseAccess, type Project, type Session } from "../api";
 import { formatBytes, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
-import { ErrorNotice } from "../components/ui/banner";
+import { Banner, ErrorNotice } from "../components/ui/banner";
 import { Button } from "../components/ui/button";
+import { Dialog } from "../components/ui/dialog";
 import { EmptyState } from "../components/ui/empty-state";
 import { Pill } from "../components/ui/pill";
 import { Skeleton } from "../components/ui/skeleton";
@@ -22,7 +23,7 @@ type DatabaseTab = "overview" | "connect" | "backups" | "access";
 const tabs: { value: DatabaseTab; label: string }[] = [{ value: "overview", label: "Overview" }, { value: "connect", label: "Connect" }, { value: "backups", label: "Backups" }, { value: "access", label: "Access" }];
 export function DatabasePage({ id, session, tab, navigate }: { id: string; session: Session; tab: string | null; navigate: (to: string) => void }) {
   const [project, setProject] = useState<Project | null>(null); const [access, setAccess] = useState<DatabaseAccess | null>(null); const [error, setError] = useState(""); const [notFound, setNotFound] = useState(false);
-  const [credentials, setCredentials] = useState<Credentials | null>(null); const [revealed, setRevealed] = useState(false); const [credentialBusy, setCredentialBusy] = useState(false); const [credentialError, setCredentialError] = useState(""); const [storage, setStorage] = useState<boolean | null>(null); const [backupBusy, setBackupBusy] = useState(false); const { showToast } = useToast();
+  const [credentials, setCredentials] = useState<Credentials | null>(null); const [revealed, setRevealed] = useState(false); const [credentialBusy, setCredentialBusy] = useState(false); const [credentialError, setCredentialError] = useState(""); const [storage, setStorage] = useState<boolean | null>(null); const [backupBusy, setBackupBusy] = useState(false); const [freezing, setFreezing] = useState(false); const [writesBusy, setWritesBusy] = useState(false); const { showToast } = useToast();
   const activeTab: DatabaseTab = tabs.some((item) => item.value === tab) ? tab as DatabaseTab : "overview";
   async function load() { try { const body = await api<{ project: Project; database_access: DatabaseAccess }>(`/projects/${id}`); setProject(body.project); setAccess(body.database_access); setError(""); } catch (failure) { if ((failure as { status?: number }).status === 404) setNotFound(true); else setError((failure as Error).message); } }
   useEffect(() => { setProject(null); void load(); void api<{ storage_configured: boolean }>(`/projects/${id}/backups`).then((body) => setStorage(body.storage_configured)).catch(() => setStorage(null)); }, [id]);
@@ -30,14 +31,20 @@ export function DatabasePage({ id, session, tab, navigate }: { id: string; sessi
   async function getCredentials() { if (credentials) return credentials; setCredentialBusy(true); setCredentialError(""); try { const value = await api<Credentials>(`/projects/${id}/credentials`); setCredentials(value); return value; } catch (failure) { setCredentialError((failure as Error).message); return null; } finally { setCredentialBusy(false); } }
   async function reveal() { const value = await getCredentials(); if (value) setRevealed(true); }
   async function copyUrl() { const value = await getCredentials(); if (value) { await navigator.clipboard.writeText(value.url); showToast("Connection URL copied"); } }
+  async function setWrites(frozen: boolean) { setWritesBusy(true); setError(""); try { const updated = await api<Project>(`/projects/${id}/writes`, { method: "PUT", body: JSON.stringify({ frozen }) }); setProject((current) => current ? { ...current, ...updated } : updated); setFreezing(false); showToast(frozen ? "Writes frozen — reads continue" : "Writes resumed"); } catch (failure) { setError((failure as Error).message); } finally { setWritesBusy(false); } }
   async function backupNow() { setBackupBusy(true); setError(""); try { await api(`/projects/${id}/backups`, { method: "POST", body: "{}" }); showToast("Backup started"); navigate(`/projects/${id}?tab=backups`); } catch (failure) { setError((failure as Error).message); } finally { setBackupBusy(false); } }
   if (notFound) return <EmptyState title="Database not found" action={<Button variant="secondary" onClick={() => navigate("/")}><ArrowLeft size={15} />Back to databases</Button>}>This database may have been removed.</EmptyState>;
   if (!project || !access) return error ? <ErrorNotice message={error} /> : <Skeleton lines={4} />;
-  const stage = databaseStage(project); const ready = project.stage === "ready" && !project.failed; const connections = project.connections_now?.length || 0; const sslmode = access.mode === "tunnel" ? "disable" : access.certificate.state === "trusted" ? "verify-full" : "require";
-  const actions = ready ? <><Button onClick={() => void copyUrl()} loading={credentialBusy}><Copy size={15} />Copy connection URL</Button><Tooltip text={storage === false ? "Set up backup storage first" : "Create a backup now"}><Button variant="secondary" onClick={() => void backupNow()} loading={backupBusy} disabled={storage !== true}><Archive size={15} />Back up now</Button></Tooltip></> : undefined;
+  const stage = databaseStage(project); const ready = project.stage === "ready" && !project.failed; const frozen = ready && project.frozen_at > 0; const connections = project.connections_now?.length || 0; const sslmode = access.mode === "tunnel" ? "disable" : access.certificate.state === "trusted" ? "verify-full" : "require";
+  const actions = ready ? <><Button onClick={() => void copyUrl()} loading={credentialBusy}><Copy size={15} />Copy connection URL</Button><Tooltip text={storage === false ? "Set up backup storage first" : "Create a backup now"}><Button variant="secondary" onClick={() => void backupNow()} loading={backupBusy} disabled={storage !== true}><Archive size={15} />Back up now</Button></Tooltip>{frozen ? <Button variant="secondary" onClick={() => void setWrites(false)} loading={writesBusy}><Play size={15} />Resume writes</Button> : <Tooltip text="Reject writes while keeping reads, e.g. before moving this database"><Button variant="secondary" onClick={() => setFreezing(true)} loading={writesBusy}><Snowflake size={15} />Freeze writes</Button></Tooltip>}</> : undefined;
   return <>
     <PageHeader eyebrow={<div className="breadcrumb"><button type="button" onClick={() => navigate("/")}>Databases</button><span>/</span><span>{project.name}</span></div>} title={project.name} status={<Pill tone={stage.tone}>{stage.label}</Pill>} description={`${ready ? formatBytes(project.size_bytes) : "Setting up"} · created ${relativeTime(project.created_at)} · ${connections ? `${connections} live connection${connections === 1 ? "" : "s"}` : "no app connected"}`} actions={actions} />
     {error && <ErrorNotice message={error} />}
+    {frozen && <Banner tone="warn">Writes have been frozen since {relativeTime(project.frozen_at)}: the app can still read, every INSERT, UPDATE or DELETE is rejected, and a backup taken now is complete. Resume writes when you are done.</Banner>}
+    <Dialog open={freezing} onClose={() => setFreezing(false)} title="Freeze writes?">
+      <div className="dialog-form"><p>Open sessions are closed and new ones are read-only. The app keeps reading; writes fail until you resume. Take the backup while frozen so nothing written afterwards is lost.</p>
+        <div className="actions"><Button onClick={() => void setWrites(true)} loading={writesBusy}>{writesBusy ? "Freezing…" : "Freeze writes"}</Button><Button type="button" variant="ghost" onClick={() => setFreezing(false)}>Cancel</Button></div></div>
+    </Dialog>
     {!ready ? <Provisioning project={project} onRetry={load} /> : <><Tabs value={activeTab} options={tabs} onChange={(next) => navigate(`/projects/${id}?tab=${next}`)} label="Database sections" /><div className="tab-panel page-enter" role="tabpanel" key={activeTab}>
       {activeTab === "overview" && <OverviewTab project={project} host={access.host} sslmode={sslmode} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} onTab={(next) => navigate(`/projects/${id}?tab=${next}`)} />}
       {activeTab === "connect" && <ConnectTab project={project} access={access} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} />}

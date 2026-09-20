@@ -283,6 +283,51 @@ func (s *Server) updateAccess(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, st)
 }
 
+// updateWrites freezes or resumes application writes for one project. The
+// PostgreSQL change happens first; if recording it fails, it is reverted so the
+// dashboard never shows a state PostgreSQL does not enforce.
+func (s *Server) updateWrites(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := s.authorize(w, r); !ok || !s.provisioningReady(w) {
+		return
+	}
+	p, ok := s.project(w, r)
+	if !ok {
+		return
+	}
+	if p.Stage != "ready" || p.Failed {
+		failure(w, 409, "not_ready", "Writes can be frozen once the database is ready.")
+		return
+	}
+	var in struct {
+		Frozen bool `json:"frozen"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Frozen == (p.FrozenAt != 0) {
+		write(w, 200, s.projectSummary(r, p))
+		return
+	}
+	if e := s.Mgmt.SetWritesFrozen(r.Context(), p.DBName, p.RoleName, in.Frozen); e != nil {
+		failure(w, 503, "postgres_unavailable", "PostgreSQL did not apply the change. Run host diagnostics.")
+		return
+	}
+	at := time.Time{}
+	if in.Frozen {
+		at = s.Now()
+	}
+	if e := s.Store.SetProjectFrozen(r.Context(), p.ID, at); e != nil {
+		_ = s.Mgmt.SetWritesFrozen(r.Context(), p.DBName, p.RoleName, !in.Frozen)
+		failure(w, 503, "metadata_unavailable", "The change could not be saved and was reverted.")
+		return
+	}
+	p.FrozenAt = at.Unix()
+	if at.IsZero() {
+		p.FrozenAt = 0
+	}
+	write(w, 200, s.projectSummary(r, p))
+}
+
 func (s *Server) createConnectionCheck(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); !ok {
 		return

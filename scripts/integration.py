@@ -186,6 +186,18 @@ def main():
             assert code == 200 and policy["state"] == "applied"
             assert psql(remote_url("Shop"), "SELECT 1;").returncode == 0
             passed("per-project allowlist enforced after reload; stale revisions rejected; tunnel path unaffected")
+            code, frozen = request(f"/api/v1/projects/{shop}/writes", {"frozen": True}, session["csrf_token"], "PUT")
+            assert code == 200 and frozen["frozen_at"] > 0, (code, frozen)
+            assert request(f"/api/v1/projects/{shop}")[1]["project"]["frozen_at"] == frozen["frozen_at"]
+            assert psql(remote_url("Shop"), "SELECT entry FROM guestbook;").stdout.strip() == "hello from shop", "reads must continue while frozen"
+            rejected = psql(remote_url("Shop"), "INSERT INTO guestbook VALUES ('while frozen');")
+            assert rejected.returncode != 0 and "read-only" in rejected.stderr, (rejected.stdout, rejected.stderr)
+            assert psql(remote_url("Blog"), "CREATE TABLE t(x int); INSERT INTO t VALUES (1); SELECT x FROM t;").stdout.strip().endswith("\n1"), "other projects keep writing"
+            assert request(f"/api/v1/projects/{shop}/writes", {"frozen": True}, session["csrf_token"], "PUT")[0] == 200, "freeze is idempotent"
+            code, resumed = request(f"/api/v1/projects/{shop}/writes", {"frozen": False}, session["csrf_token"], "PUT")
+            assert code == 200 and resumed["frozen_at"] == 0, (code, resumed)
+            assert psql(remote_url("Shop"), "INSERT INTO guestbook VALUES ('after resume'); DELETE FROM guestbook WHERE entry='after resume'; SELECT count(*) FROM guestbook;").stdout.strip().endswith("\n1"), "writes must work again after resume"
+            passed("freezing writes keeps reads, rejects writes, leaves other projects alone, and resumes")
             code, check = request(f"/api/v1/projects/{shop}/connection-checks", {}, session["csrf_token"])
             assert code == 201, (code, check)
             probe = subprocess.Popen(["docker", "run", "--rm", "--network", project + "_dbpublic", "--entrypoint", "psql", images["postgres"], remote_url("Shop") + "&application_name=" + check["application_name"], "-c", "select pg_sleep(15)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -27,6 +27,15 @@ func TestProjectRoutesRequireAuthAndProvisioning(t *testing.T) {
 	if r = f.request("GET", "/api/v1/projects/prj_missing", "", cookie, "", ""); r.Code != 404 {
 		t.Fatal(r.Code, r.Body.String())
 	}
+	if r = f.request("PUT", "/api/v1/projects/prj_missing/writes", `{"frozen":true}`, nil, "", f.s.Config.Origin); r.Code != 401 {
+		t.Fatal("freeze without session", r.Code)
+	}
+	if r = f.request("PUT", "/api/v1/projects/prj_missing/writes", `{"frozen":true}`, cookie, "", f.s.Config.Origin); r.Code != 403 {
+		t.Fatal("freeze without CSRF", r.Code)
+	}
+	if r = f.request("PUT", "/api/v1/projects/prj_missing/writes", `{"frozen":true}`, cookie, csrf, f.s.Config.Origin); r.Code != 503 || !strings.Contains(r.Body.String(), "postgres_unavailable") {
+		t.Fatal("freeze without PostgreSQL", r.Code, r.Body.String())
+	}
 	r = f.request("GET", "/api/v1/auth/session", "", cookie, "", "")
 	var session map[string]any
 	json.Unmarshal(r.Body.Bytes(), &session)
