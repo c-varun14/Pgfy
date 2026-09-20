@@ -11,7 +11,7 @@ export const STAGE_TEXT: Record<Project["stage"], string> = { identity_persisted
 
 export function Provisioning({ project, onRetry }: { project: Project; onRetry: () => Promise<void> }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  const current = stages.indexOf(project.stage);
+  const current = Math.max(0, stages.indexOf(project.stage));
   async function retry() { setBusy(true); setError(""); try { await api(`/projects/${project.id}/retry`, { method: "POST", body: "{}" }); await onRetry(); } catch (failure) { setError((failure as Error).message); } finally { setBusy(false); } }
   return <Card><CardHeader title={project.failed ? "Database setup stopped" : "Setting up your database"} aside={!project.failed && <RefreshCw className="spin" size={16} />} />
     <Stepper steps={stages.map((stage, index) => ({ label: STAGE_TEXT[stage], state: index < current ? "done" : index === current ? (project.failed ? "failed" : "active") : "pending" }))} />

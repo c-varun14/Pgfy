@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+const port = process.env.PGFY_E2E_PORT || "8080";
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: false,
@@ -9,11 +10,13 @@ export default defineConfig({
     trace: "retain-on-failure",
     launchOptions: {
       executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE,
+      // Keep the required tunnel origin while allowing an isolated local fixture.
+      args: port === "8080" ? [] : [`--host-rules=MAP 127.0.0.1:8080 127.0.0.1:${port}`],
     },
   },
   webServer: {
     command: "python3 ../scripts/e2e-server.py",
-    url: "http://127.0.0.1:8080/health/live",
+    url: `http://127.0.0.1:${port}/health/live`,
     reuseExistingServer: false,
     timeout: 30000,
   },

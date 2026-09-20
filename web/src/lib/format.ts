@@ -1,5 +1,6 @@
 export function formatBytes(bytes: number | null | undefined) {
   if (bytes == null) return "—";
+  if (bytes === 0) return "Empty";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;
   let unit = 0;
@@ -22,8 +23,19 @@ export function formatDuration(seconds: number) {
 export function relativeTime(seconds: number) {
   const delta = seconds - Date.now() / 1000;
   const abs = Math.abs(delta);
-  const [value, unit] = abs < 60 ? [Math.max(1, Math.round(abs)), "min"] : abs < 86400 ? [Math.round(abs / 3600), "h"] : [Math.round(abs / 86400), "d"];
-  return delta > 0 ? `in ${value} ${unit}` : `${value} ${unit} ago`;
+  const future = delta > 0;
+  if (abs < 45) return future ? "in a moment" : "just now";
+  let value: number;
+  let unit: string;
+  if (abs < 3600) { value = Math.max(1, Math.round(abs / 60)); unit = "min"; }
+  else if (abs < 86400) { value = Math.max(1, Math.round(abs / 3600)); unit = "h"; }
+  else if (abs < 7 * 86400) { value = Math.max(1, Math.round(abs / 86400)); unit = "d"; }
+  else return new Date(seconds * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  return future ? `in ${value} ${unit}` : `${value} ${unit} ago`;
+}
+
+export function formatDateTime(seconds: number) {
+  return new Date(seconds * 1000).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 export const STAGE_LABELS: Record<string, string> = {

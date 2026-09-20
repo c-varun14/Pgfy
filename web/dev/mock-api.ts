@@ -26,7 +26,15 @@ function tick(job: MockJob) {
   const elapsed = Math.floor((Date.now() - job.started_at * 1000) / 1000); job.elapsed_seconds = elapsed;
   const stages = job.kind === "backup" ? ["preparing", "snapshot", "dump", "checksum", "upload_archive", "upload_manifest", "done"] : ["download", "verify_archive", "create_project", "restore", "verify", "done"];
   const index = Math.min(stages.length - 1, Math.floor(elapsed / 1.5)); job.stage = stages[index]; job.state = index === stages.length - 1 ? "succeeded" : "running";
-  if (job.state === "succeeded" && !job.finished_at) { job.finished_at = now(); job.result = job.kind === "restore" ? { verified: true, project_id: job.project_id, checks: [{ name: "Archive checksum", ok: true, detail: "Matched" }, { name: "Table row counts", ok: true, detail: "Matched" }] } : { size_bytes: 13_200_000, sha256: "d56fc82bb2477cddd0f1" }; }
+  if (job.state === "succeeded" && !job.finished_at) {
+    job.finished_at = now();
+    if (job.kind === "restore") job.result = { verified: true, project_id: job.project_id, checks: [{ name: "Archive checksum", ok: true, detail: "Matched" }, { name: "Table row counts", ok: true, detail: "Matched" }] };
+    else {
+      job.result = { size_bytes: 13_200_000, sha256: "d56fc82bb2477cddd0f1" };
+      const owner = projects.find((item) => item.id === job.project_id);
+      if (owner) manifests = [manifest(owner.id, owner.name, 0), ...manifests];
+    }
+  }
   return job;
 }
 
