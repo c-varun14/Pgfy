@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export type ThemePreference = "light" | "dark" | "system";
 
 const query = "(prefers-color-scheme: dark)";
+const changeEvent = "pgfy-theme-change";
 
 function readTheme(): ThemePreference {
   const saved = localStorage.getItem("pgfy-theme");
@@ -18,6 +19,11 @@ function applyTheme(preference: ThemePreference) {
 export function useTheme() {
   const [theme, setThemeState] = useState<ThemePreference>(readTheme);
   useEffect(() => {
+    const sync = (event: Event) => setThemeState((event as CustomEvent<ThemePreference>).detail);
+    addEventListener(changeEvent, sync);
+    return () => removeEventListener(changeEvent, sync);
+  }, []);
+  useEffect(() => {
     applyTheme(theme);
     localStorage.setItem("pgfy-theme", theme);
     if (theme !== "system") return;
@@ -26,5 +32,9 @@ export function useTheme() {
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, [theme]);
-  return { theme, setTheme: setThemeState };
+  const setTheme = useCallback((preference: ThemePreference) => {
+    setThemeState(preference);
+    dispatchEvent(new CustomEvent(changeEvent, { detail: preference }));
+  }, []);
+  return { theme, setTheme };
 }

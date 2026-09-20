@@ -1,135 +1,34 @@
-import { ExternalLink, Terminal } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import type { Settings, Status } from "../api";
-import { Notice, Pill } from "../ui";
-import { StoragePanel } from "./Storage";
+import { PageHeader } from "../components/PageHeader";
+import { Banner } from "../components/ui/banner";
+import { Card, CardHeader } from "../components/ui/card";
+import { CopyButton } from "../components/ui/copy-button";
+import { DetailsList } from "../components/ui/details-list";
+import { Pill } from "../components/ui/pill";
+import { SegmentedControl } from "../components/ui/segmented-control";
+import { type ThemePreference, useTheme } from "../theme";
 
+function friendlyName(key: string) { return key === "application" ? "Pgfy" : key.replaceAll("_", " ").replace(/\b\w/g, (value) => value.toUpperCase()); }
 export function SettingsPage({ settings, status }: { settings: Settings; status: Status | null }) {
-  const access = status?.database_access;
-  const cert = access?.certificate;
-  return (
-    <>
-      <StoragePanel />
-      <section className="panel">
-        <div className="panel-heading">
-          <h2>Database access</h2>
-          {access && (
-            <Pill tone={access.mode === "direct" ? (cert?.state === "trusted" ? "good" : "wait") : "neutral"}>
-              {access.mode === "direct" ? "Public · TLS required" : "SSH tunnel only"}
-            </Pill>
-          )}
-        </div>
-        {access ? (
-          <dl className="details">
-            <div>
-              <dt>Host</dt>
-              <dd className="mono">{access.host}</dd>
-            </div>
-            <div>
-              <dt>Port</dt>
-              <dd className="mono">{access.port}</dd>
-            </div>
-            <div>
-              <dt>Certificate</dt>
-              <dd>
-                {cert?.state === "trusted"
-                  ? `Issued by ${cert.issuer || "a public authority"} · valid until ${cert.not_after}`
-                  : cert?.state === "placeholder"
-                    ? "Self-signed placeholder — clients cannot verify the server yet"
-                    : "Unknown"}
-              </dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="muted">Loading…</p>
-        )}
-        {access?.mode === "direct" && (
-          <Notice>
-            <Terminal size={18} />
-            <span>
-              Applications connect to <code>{access.host}:5432</code>. Your provider’s firewall must allow TCP 5432; each project also has its own allowed-address rules.
-              {cert?.state !== "trusted" && (
-                <>
-                  {" "}Run <code>sudo pgfyctl sync-db-cert</code> on the server to deliver the dashboard certificate to PostgreSQL.
-                </>
-              )}
-            </span>
-          </Notice>
-        )}
-        {access?.mode === "tunnel" && (
-          <Notice>
-            <Terminal size={18} />
-            <span>
-              PostgreSQL listens on the server’s loopback only. Developers forward it with <code>ssh -N -L 5432:127.0.0.1:5432 user@server</code>. To offer direct TLS access, give the installation a hostname with <code>pgfyctl hostname</code>.
-            </span>
-          </Notice>
-        )}
-      </section>
-      <section className="panel">
-        <div className="panel-heading">
-          <h2>Connection & installation</h2>
-          <span className="subtle-tag">Read-only</span>
-        </div>
-        <dl className="details">
-          <div>
-            <dt>Dashboard address</dt>
-            <dd>
-              <a href={settings.origin}>
-                {settings.origin}
-                <ExternalLink size={13} />
-              </a>
-            </dd>
-          </div>
-          <div>
-            <dt>Access mode</dt>
-            <dd>{settings.mode === "https" ? "Public HTTPS" : "Loopback · SSH tunnel only"}</dd>
-          </div>
-          <div>
-            <dt>Installation ID</dt>
-            <dd>{settings.id}</dd>
-          </div>
-          <div>
-            <dt>Installed release</dt>
-            <dd>{settings.release}</dd>
-          </div>
-        </dl>
-        <Notice>
-          <Terminal size={18} />
-          <span>
-            Change the hostname or recover access with <code>pgfyctl</code> on your server. Changes require signing in again.
-          </span>
-        </Notice>
-      </section>
-      <section className="panel">
-        <div className="panel-heading">
-          <h2>Host components</h2>
-          <span className="muted">Recorded during installation</span>
-        </div>
-        <dl className="details">
-          <div>
-            <dt>PostgreSQL</dt>
-            <dd>{status?.postgres.version || "Connection unavailable"}</dd>
-          </div>
-          <div>
-            <dt>Caddy</dt>
-            <dd>{settings.caddy_version}</dd>
-          </div>
-          <div>
-            <dt>Docker Engine</dt>
-            <dd>{settings.docker_version}</dd>
-          </div>
-          <div>
-            <dt>Docker Compose</dt>
-            <dd>{settings.compose_version}</dd>
-          </div>
-          {status &&
-            Object.entries(status.versions).map(([key, value]) => (
-              <div key={key}>
-                <dt>{key}</dt>
-                <dd>{value}</dd>
-              </div>
-            ))}
-        </dl>
-      </section>
-    </>
-  );
+  const access = status?.database_access; const certificate = access?.certificate; const { theme, setTheme } = useTheme();
+  const themeOptions: { value: ThemePreference; label: string }[] = [{ value: "light", label: "Light" }, { value: "dark", label: "Dark" }, { value: "system", label: "System" }];
+  return <><PageHeader title="Settings" />
+    <Card><CardHeader title="Server" /><DetailsList items={[
+      { label: "Dashboard address", value: <a href={settings.origin}>{settings.origin} <ExternalLink size={13} /></a> },
+      { label: "Access mode", value: settings.mode === "https" ? "Public HTTPS" : "SSH tunnel only" },
+      { label: "Pgfy version", value: settings.release || status?.versions.application || "Unavailable" },
+      { label: "PostgreSQL version", value: status?.postgres.version || "Connection unavailable" },
+    ]} /></Card>
+    <Card><CardHeader title="Database endpoint" aside={access && <Pill tone={access.mode === "direct" ? certificate?.state === "trusted" ? "good" : "wait" : "neutral"}>{access.mode === "direct" ? certificate?.state === "trusted" ? "Certificate trusted" : "Certificate pending" : "Tunnel only"}</Pill>} />
+      {access ? <><DetailsList items={[{ label: "Address", value: <code>{access.host}:{access.port}</code>, copy: `${access.host}:${access.port}` }, { label: "Certificate", value: certificate?.state === "trusted" ? `Trusted${certificate.issuer ? ` · ${certificate.issuer}` : ""}` : certificate?.state === "placeholder" ? "Not issued yet" : "Status unavailable" }]} />
+        {access.mode === "direct" && certificate?.state !== "trusted" && <Banner tone="warn">Run <code>sudo pgfyctl sync-db-cert</code> on the server to issue the database certificate.</Banner>}
+        <p className="caption">{access.mode === "direct" ? "Allow TCP port 5432 in your provider firewall for the app servers that connect." : "Open an SSH tunnel before connecting to PostgreSQL."}</p></> : <p>Database access details are unavailable.</p>}
+    </Card>
+    <Card><CardHeader title="Appearance" /><SegmentedControl value={theme} options={themeOptions} onChange={setTheme} label="Theme" /></Card>
+    <details className="components-details"><summary>Components</summary><Card><DetailsList items={[
+      { label: "Caddy", value: settings.caddy_version }, { label: "Docker", value: settings.docker_version }, { label: "Compose", value: settings.compose_version },
+      ...Object.entries(status?.versions || {}).map(([key, value]) => ({ label: friendlyName(key), value })),
+    ]} /><div className="installation-id"><span>Installation ID</span><code>{settings.id}</code><CopyButton value={settings.id} label="Copy" /></div></Card></details>
+  </>;
 }

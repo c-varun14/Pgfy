@@ -26,7 +26,7 @@ export function BackupsPage({ navigate }: { navigate: (to: string) => void }) {
   const showForm = storage && (!storage.configured || editing || discovery?.state === "storage_error");
   return <>
     <PageHeader title="Backups" description="Daily backups of every database to a bucket you own. Restore any of them here — on this server or a new one." />
-    {error && <ErrorNotice message={error} />}
+    {error && discovery?.state !== "storage_error" && <ErrorNotice message={error} />}
     {!storage || !discovery ? !error && <Skeleton lines={4} /> : <>
       <Card><CardHeader title={storage.configured ? "Backup storage" : "Set up backup storage"} aside={storage.configured && <><Pill tone="good">Storage connected · {storage.settings.bucket}</Pill><Button size="sm" variant="secondary" onClick={() => setEditing(!editing)}>{editing ? "Close" : "Edit storage"}</Button></>} />
         {!storage.configured && <><h2>Backup storage</h2><ul className="feature-list"><li>Runs daily for every database</li><li>Uses your own S3-compatible bucket</li><li>Restores on this server or a new one</li></ul></>}

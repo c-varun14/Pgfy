@@ -6,7 +6,7 @@ test("initial setup, PostgreSQL degradation, settings, logout, and login", async
 }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Make yourself at home." }),
+    page.getByRole("heading", { name: "Create your admin account" }),
   ).toBeVisible();
   await page.getByLabel("Setup token").fill("invalid");
   await page.getByLabel("Email address").fill("admin@example.com");
@@ -20,7 +20,7 @@ test("initial setup, PostgreSQL degradation, settings, logout, and login", async
     .fill(readFileSync("../.cache/e2e-token", "utf8").trim());
   await page.getByRole("button", { name: "Create administrator" }).click();
   await expect(
-    page.getByRole("heading", { name: "A place to build." }),
+    page.getByRole("heading", { name: "Databases", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Your server needs attention" }),
@@ -29,31 +29,33 @@ test("initial setup, PostgreSQL degradation, settings, logout, and login", async
     page.getByRole("heading", { name: "No databases yet" }),
   ).toBeVisible();
   // Without PostgreSQL the fixture must refuse creation honestly instead of queueing it.
-  await page.getByLabel("New project").fill("Shop");
+  await page.locator("header").getByRole("button", { name: "New database" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Shop");
   await page.getByRole("button", { name: "Create database" }).click();
   await expect(page.getByRole("alert")).toContainText("unavailable");
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Backups", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Recover from backups." }),
+    page.getByRole("heading", { name: "Backups", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Backup storage", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("unavailable");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Installation settings." }),
+    page.getByRole("heading", { name: "Settings", exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Read-only", { exact: true })).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Backup storage" }),
-  ).toBeVisible();
+  await expect(page.getByText("Read-only", { exact: true })).toHaveCount(0);
   await expect(page.getByText("SSH tunnel only", { exact: true })).toBeVisible();
   await page.goto("/settings");
   await expect(
-    page.getByRole("heading", { name: "Installation settings." }),
+    page.getByRole("heading", { name: "Settings", exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Projects", exact: true }).click();
+  await page.getByRole("button", { name: "Databases", exact: true }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(
-    page.getByRole("heading", { name: "Sign in to your server." }),
+    page.getByRole("heading", { name: "Sign in", exact: true }),
   ).toBeVisible();
   await page.getByLabel("Email address").fill("admin@example.com");
   await page.getByLabel("Password", { exact: true }).fill("incorrect password");
@@ -64,15 +66,15 @@ test("initial setup, PostgreSQL degradation, settings, logout, and login", async
     .fill("a sufficiently long passphrase");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "A place to build." }),
+    page.getByRole("heading", { name: "Databases", exact: true }),
   ).toBeVisible();
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "A place to build." }),
+    page.getByRole("heading", { name: "Databases", exact: true }),
   ).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(
-    page.getByRole("heading", { name: "A place to build." }),
+    page.getByRole("heading", { name: "Databases", exact: true }),
   ).toBeVisible();
   expect(
     await page.evaluate(
