@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, APIError, setCSRF, type Session, type Settings, type Status } from "./api";
 import { Shell } from "./components/Shell";
-import { BrandMark } from "./components/Sidebar";
+import { BrandMark } from "./components/Brand";
 import { ErrorNotice } from "./components/ui/banner";
 import { Skeleton } from "./components/ui/skeleton";
 import { useRoute } from "./router";

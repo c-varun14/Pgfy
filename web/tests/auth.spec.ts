@@ -17,7 +17,7 @@ test("initial setup, PostgreSQL degradation, settings, logout, and login", async
   await expect(page.getByRole("alert")).toContainText("valid email");
   await page
     .getByLabel("Setup token")
-    .fill(readFileSync("../.cache/e2e-token", "utf8").trim());
+    .fill(readFileSync(`../.cache/e2e-token${process.env.PGFY_E2E_PORT ? `-${process.env.PGFY_E2E_PORT}` : ""}`, "utf8").trim());
   await page.getByRole("button", { name: "Create administrator" }).click();
   await expect(
     page.getByRole("heading", { name: "Databases", exact: true }),
@@ -55,7 +55,7 @@ test("initial setup, PostgreSQL degradation, settings, logout, and login", async
   await page.getByRole("button", { name: "Databases", exact: true }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(
-    page.getByRole("heading", { name: "Sign in", exact: true }),
+    page.getByRole("heading", { name: "Welcome back", exact: true }),
   ).toBeVisible();
   await page.getByLabel("Email address").fill("admin@example.com");
   await page.getByLabel("Password", { exact: true }).fill("incorrect password");

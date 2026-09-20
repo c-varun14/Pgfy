@@ -3,29 +3,13 @@ import type { Session, Settings, Status } from "../api";
 import { type ThemePreference, useTheme } from "../theme";
 import { SegmentedControl } from "./ui/segmented-control";
 import { Tooltip } from "./ui/tooltip";
+import { Brand } from "./Brand";
 
 const nav = [
   { label: "Databases", path: "/", icon: Database },
   { label: "Backups", path: "/backups", icon: HardDrive },
   { label: "Settings", path: "/settings", icon: Settings2 },
 ];
-
-export function BrandMark({ size = 26 }: { size?: number }) {
-  return (
-    <span className="brand-mark" aria-hidden="true">
-      <Database size={Math.round(size * 0.58)} strokeWidth={2.4} />
-    </span>
-  );
-}
-
-export function Brand({ onClick }: { onClick?: () => void }) {
-  return (
-    <button type="button" className="brand" aria-label="Pgfy home" onClick={onClick}>
-      <BrandMark />
-      <span className="brand-text">pgfy<span className="brand-dot">.</span></span>
-    </button>
-  );
-}
 
 export function Sidebar({ path, session, status, settings, navigate, onLogout }: { path: string; session: Session; status: Status | null; settings: Settings | null; navigate: (to: string) => void; onLogout: () => void }) {
   const { theme, setTheme } = useTheme();
