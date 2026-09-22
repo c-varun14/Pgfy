@@ -3,7 +3,7 @@
 Build a complete app around three journeys: create a database, connect safely, and recover after server loss.
 
 Phases 1–4 implement the complete MVP. Phase 3 proves the highest-risk recovery path before scheduling and UI refinement. Phase 5 completes
-the submission. Phase 6 is the mandatory gate before running the operator's own modest production applications under one trusted admin.
+the submission. Phase 6 is the post-hackathon roadmap and mandatory gate before running the operator's own modest production applications under one trusted admin.
 The submission deadline does not reduce MVP acceptance criteria or establish production readiness. PgBouncer is not a submission dependency.
 
 The core setup is: install on a compatible VPS → configure an existing S3-compatible bucket in Settings → test storage → back up and recover.
@@ -269,12 +269,145 @@ submission. Clearly identify any remaining required feature as unfinished rather
 
 ## Phase 6 — Post-demo hardening and operation
 
-Goal: Run one low-stakes application with tested recovery and explicit maintenance responsibilities.
+Goal: Run one low-stakes application with tested recovery and explicit maintenance responsibilities, then expand to the operator's own
+client databases. Everything in this phase is post-hackathon work on the `mvp-to-production` branch; `main` remains the submitted MVP.
 
-### Production gate
+The roadmap below was agreed on 2026-09-22 after three review rounds against the code. The gate checklist that closed the MVP plan is kept
+unchanged at the end of this phase as the acceptance list; the tiers describe what has to be built so that every gate item has something to
+test. Three operator decisions bound the design: one administrator and no team features, ever; new databases stay open to the internet by
+default (TLS plus SCRAM password) with a visible warning rather than a forced allowlist, because client apps on serverless platforms have no
+stable egress address; and the dashboard's second factor is an authenticator app enrolled by typing the key, with recovery through SSH on
+the host rather than recovery codes.
 
-Start post-demo work with retention, external alerts, abandoned-work cleanup, the manual update procedure, and runbook-only recovery.
-Every requirement below remains mandatory before real workloads; this ordering does not make the other checks optional.
+### Defects found during review
+
+These are real today and shape Tier 0 A:
+
+- Scheduler starvation. `store.Projects` orders by creation time (`internal/store/projects.go`), `scheduleBackups` enqueues only the first
+  overdue project per tick and returns (`internal/jobs/jobs.go`), and "overdue" is measured from the last *successful* backup
+  (`internal/store/jobs.go`). One old project whose backup keeps failing is retried every five minutes with no backoff and blocks every
+  later project's backups indefinitely.
+- Recovery truncation. `ListManifests` sorts object keys reverse-lexicographically, which groups by database name rather than time, and
+  only then cuts to the limit (`internal/storage/storage.go`); the caller passes 200 (`internal/httpapi/backups.go`). Once a bucket holds
+  more than 200 manifests, whole databases disappear from the Recovery page.
+- Restore honesty. A non-zero `pg_restore` exit is stored as a warning and the job can still report "verified" when the row-count,
+  ownership and connect checks pass (`internal/jobs/jobs.go`).
+- `GET /api/v1/system/status` hardcodes `"backups": "not_configured"` (`internal/httpapi/server.go`).
+- Rollback hazard for any future updater: `store.Open` migrates SQLite on start and an older binary rejects unknown migrations
+  (`internal/store/store.go`), so rolling back means restoring a SQLite snapshot, not just the previous image.
+
+### Tier 0 — required before the first real database
+
+**A. Backup correctness** (one release; ships as the last manual reinstall)
+
+- Scheduler fairness and backoff: consider every overdue ready project each tick, ordered by least recently attempted; after a failure set a
+  per-project next attempt at 15 minutes, then 1 hour, 4 hours, then the configured interval. One job at a time is unchanged.
+- Configurable backup target interval (24, 12, 6 or 1 hour) in Settings, default 24 hours, and a per-project "newest recoverable backup age"
+  in the dashboard. The interval is a target, not a guarantee; the age is what the stale-backup alert uses.
+- Discovery lists each database prefix separately, sorts by the timestamp segment, applies no global truncation, and returns per-project
+  pages newest first. Fix the hardcoded status field.
+- Restore honesty: a non-zero `pg_restore` exit reports "completed with N restore errors" with a stderr excerpt, `verified=false`, and the
+  project remains usable. Verification also compares counts of sequences, views, functions, indexes and constraints captured at dump time;
+  the 500-table capture limit is raised and reported when hit.
+- Reconciliation and retention keyed off the bucket, run after each successful backup: delete the manifest first, then the archive, then the
+  SQLite row (the mirror of "manifest published last", so a half-deleted backup is never discoverable); delete archive-only directories older
+  than 24 hours; hide and alert on manifest-only backups but never delete them automatically; never delete a database's newest backup; never
+  touch other installation IDs; run only when bucket protection is verified or acknowledged. Defaults: 14 daily and 8 weekly. Prune job rows
+  older than 90 days.
+- Storage check: where `GetBucketVersioning` is supported, require it enabled; where the provider returns NotImplemented (Cloudflare R2),
+  Settings requires an explicit acknowledgment that the bucket is protected by the provider's lock mechanism or that the application
+  credential may delete backups. Endpoints must be HTTPS unless a "private endpoint" toggle limits them to loopback or RFC 1918 addresses.
+  Document a credential policy that denies `s3:DeleteObjectVersion` and bucket-configuration actions, and provider encryption at rest.
+
+**B. Access and capacity**
+
+- Show an "Open to the internet" pill on the list and detail views for projects whose policy includes `0.0.0.0/0`. The default is unchanged.
+- Connection budget: `reserved_connections=10` with `pg_use_reserved_connections` granted to `pgfy_mgmt` and `pgfy_health` so management and
+  health can never be locked out by project roles; Settings shows the sum of role limits against `max_connections` and current use; alert
+  at 80% globally and per role.
+- Per-role guardrails set at provisioning and overridable per project later: `statement_timeout` 60 s, `idle_in_transaction_session_timeout`
+  5 min, `temp_file_limit` 1 GB, `lock_timeout` 10 s.
+- Credential rotation: one action issues a new password, seals it, re-asserts it on the role, terminates the role's sessions, shows the new
+  credentials once, and writes an audit row.
+
+**C. Operability**
+
+- `pgfyctl update <bundle>`: verify the bundle; refuse while a job is running (or `--drain` waits and blocks new jobs); stop the application;
+  snapshot SQLite with `VACUUM INTO` and copy `config/`; pull the pinned images; start; migrate; wait for readiness; on failure stop, restore
+  the snapshot and the previous bundle and digests, start, verify and report. Sessions may be invalidated. The integration test must cover a
+  rollback after a migration has run.
+- Alerts: one generic JSON webhook configured in Settings, sealed like storage settings, with a test button. Events: backup failed (from the
+  second backoff attempt), newest recoverable backup older than 1.5× the interval, job interrupted by restart, PostgreSQL unreachable for
+  more than five minutes, free disk under 15% on the data, workspace or root filesystem, certificate expiring within 14 days or
+  `sync-db-cert` failed, connections at 80% globally or per role, host clock not NTP-synchronised, manifest-only backup found, administrator
+  reset performed, credential rotated. One alert per condition per 24 hours, with a resolved message. An external uptime monitor on
+  `/health/ready` (public in HTTPS mode only) covers the whole-host-down case.
+- A host status file (free disk for the PostgreSQL volume, workspace and root; NTP state; last certificate sync result) written by a
+  five-minute systemd timer and by the certificate unit, read by the application the way `postgres-tls/state.json` is today.
+- Certificate expiry shown in Settings. The same certificate serves the dashboard and PostgreSQL, so an expiry is an outage for every client
+  connecting with `verify-full`.
+- Host runbook and installer: enable `unattended-upgrades` for security updates; document patch and reboot cadence with validation steps,
+  provider-console and SSH-key break-glass access, manual project removal until deletion exists, a one-line client acceptance of the backup
+  target interval, and bucket-protection steps per provider.
+- An append-only audit table (administrator, action, target, time, request ID) for reset, second-factor change, rotation, access change,
+  deletion and settings changes. No UI yet.
+
+**D. Authentication** (mandatory second factor in HTTPS mode; optional in tunnel mode)
+
+- One `auth_tokens` table: purpose (`setup`, `reset`, `enrol`, `pending`), token hash, expiry, attempts and maximum, consumed time, parent
+  token and a sealed payload. Attempt counts increase inside the verifying transaction with a guard on the maximum; exceeding it consumes
+  the token. Cookies follow the existing mode rule: `__Host-` prefixed and Secure in HTTPS mode, host-only and non-Secure in tunnel mode;
+  always HttpOnly and SameSite=Strict.
+- Setup: the setup form validates the setup token, email and password, generates a TOTP secret, stores an enrolment token (10 minutes,
+  parent = setup token, sealed email, password hash and secret) and shows the base32 key for manual entry. The setup token is consumed at
+  this point so competing enrolments are impossible. Confirmation with one valid code, in a single transaction, re-checks the enrolment
+  token and parent, verifies there is still no administrator, verifies the code with one step of skew, inserts the administrator with the
+  sealed secret and last accepted step, creates the session and consumes the enrolment token. If the window lapses, `pgfyctl setup-token`
+  issues a new setup token as it does today.
+- Login: the password step keeps the existing Argon2 slot and limits and, on success, sets a pending cookie (five minutes, bound to the
+  administrator and the current password hash) without creating a session. The code step uses its own rate bucket and no Argon2 slot; in
+  one transaction it loads and increments the pending token, verifies the code, updates the last accepted step only if the new step is
+  greater (a replayed code updates zero rows and is rejected), creates the session and consumes the pending token.
+- Reset over SSH: `pgfyctl reset-admin` runs `pgfy reset-admin` in the container, which prints a one-use 30-minute reset token to the
+  operator's terminal and stores only its hash. The dashboard's "Reset access" form takes the token and a new password, consumes the reset
+  token, issues an enrolment token with a fresh secret, and shows the key. Confirmation with one valid code replaces the password hash,
+  secret and last step, deletes every session, pending and enrolment token, writes an audit row and sends an alert, all in one transaction.
+  The old password and second factor remain valid until that moment, so an abandoned reset cannot lock the operator out. If the dashboard
+  certificate has expired, switch to `pgfyctl tunnel` and complete the reset over an SSH port-forward.
+- Host clock state is part of status and alerts because TOTP depends on it. RFC 6238 is implemented with the standard library; no QR code
+  and no new dependency.
+
+### Tier 1 — during the first month of operation
+
+- Project deletion as a durable job with a `deleting` tombstone that resumes safely after restart: writes frozen, a backup newer than the
+  interval or an explicit acknowledgment, the name typed to confirm, sessions terminated, database and role dropped, policy synced, rows
+  removed. Backups in the bucket remain under retention.
+- Automated weekly restore verification into a scratch project, using the improved checks and deletion; show "last verified restore" per
+  project.
+- `pgfyctl export-recovery-kit` writing the secrets and configuration as a tarball to stdout for the operator's password manager, plus
+  nightly SQLite `VACUUM INTO` copies (keep seven). This is convenience, not disaster recovery: recovery from the bucket alone is the tested
+  path and needs neither the key nor SQLite.
+- Bundle signing verified by the bootstrap script and installer.
+- Slack and Discord notifier adapters; optional SMTP.
+- Audit view in Settings; a preferred backup hour; `shared_buffers` and `effective_cache_size` sized from measured host memory with headroom
+  for Docker, Caddy, the application and dump/restore processes.
+
+### Tier 2 — deferred, with the condition that would pull each one forward
+
+PgBouncer until measured connection pressure shows the budget is insufficient (the follow-up design below still applies); point-in-time
+recovery until a client's accepted backup target interval is shorter than one hour; high availability; automated major-version upgrades; a
+SQL editor; DNS-01 issuance; IPv6 probing; client-side backup encryption; signed manifests; team permissions (never).
+
+### Sequencing
+
+A → the updater → B → the rest of C → D → Tier 1 → the gate below → remove the "hackathon MVP" wording. A comes before the updater
+because the fairness and truncation defects can lose backups today and A itself ships as the last manual reinstall; the updater is needed to
+ship everything after it. Each slice is a commit series on `mvp-to-production` prefixed with its roadmap item; the branch merges to `main`
+only when the gate passes.
+
+### Production gate (unchanged acceptance list)
+
+Every requirement below remains mandatory before real workloads; the tiers above exist so that each can actually be exercised.
 
 - Review setup-token recovery, credentials at rest and in logs, TLS/certificate renewal, permissions, and actual network exposure.
 - Exercise automatic database certificate renewal, failure/retry, and credential rotation without losing administrative access. Verify the
@@ -288,14 +421,15 @@ Every requirement below remains mandatory before real workloads; this ordering d
 - Define acceptable data loss and recovery time for the first application and verify the results meet them.
 - Measure resource use with the intended application workload during backup and restore, including connection budgets, disk workspace, and
   log growth. Do not treat the Phase 1 2 GiB validation host as an established production capacity.
+- Run one low-stakes application for at least two weeks with alerts observed before moving client databases.
 
 A demo does not establish production readiness. Move one low-stakes application only after the complete MVP and this gate pass; expand after
 observing backups, recovery, and maintenance in actual operation. Keep the same application architecture; secret protection, bounded logs
 and temporary storage, timeouts, migrations, and durable jobs are already MVP foundations rather than a production rewrite.
 
-### PgBouncer follow-up
+### PgBouncer follow-up (Tier 2)
 
-Introduce pooling as a separate, tested change after submission:
+Introduce pooling as a separate, tested change only when observed connection pressure requires it:
 
 - Pin a separate PgBouncer container and offer pooled alongside direct connection details.
 - Integrate project provisioning and credential changes with pooler authentication/configuration.
@@ -305,17 +439,6 @@ Introduce pooling as a separate, tested change after submission:
 - Verify both projects’ authentication, isolation, credential changes, connection limits, and recovery on a replacement server.
 
 Pooling must not weaken the existing access policy or recovery flow. Do not promise transparent transaction retries or zero-downtime restarts.
-
-### Further improvements
-
-Prioritize according to observed usage:
-
-- Automated recurring restore verification.
-- Richer monitoring and capacity guidance.
-- Expansion of the tested OS/provider/storage compatibility matrix beyond the provider-neutral MVP's initial validation.
-- Customer-triggered updates via a restricted host-side updater independent of the dashboard, with approved pinned images, prerequisite and
-  readiness checks, durable results, and measured downtime.
-- A formal patch-management policy and PgBouncer-assisted maintenance coordination.
 
 Keep database updates within the supported major version. Automated major upgrades, high availability, and point-in-time recovery require
 separate designs and remain outside this plan’s MVP.
