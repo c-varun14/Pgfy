@@ -12,26 +12,54 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
-	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// Bucket protection: backups are only as safe as the bucket holding them. The
+// application credential can write and delete objects, so either the provider
+// keeps versions of what it deletes, or the operator says explicitly that they
+// accept that risk.
+const (
+	ProtectionVersioning   = "versioning"
+	ProtectionAcknowledged = "acknowledged"
+)
+
+// Observed states of the bucket's versioning configuration.
+const (
+	VersioningEnabled     = "enabled"
+	VersioningDisabled    = "disabled"
+	VersioningUnsupported = "unsupported"
+)
+
 type Settings struct {
-	Endpoint     string `json:"endpoint"`
-	Region       string `json:"region"`
-	Bucket       string `json:"bucket"`
-	Prefix       string `json:"prefix"`
-	AccessKey    string `json:"access_key"`
-	SecretKey    string `json:"secret_key"`
-	SessionToken string `json:"session_token"`
-	PathStyle    bool   `json:"path_style"`
+	Endpoint            string `json:"endpoint"`
+	Region              string `json:"region"`
+	Bucket              string `json:"bucket"`
+	Prefix              string `json:"prefix"`
+	AccessKey           string `json:"access_key"`
+	SecretKey           string `json:"secret_key"`
+	SessionToken        string `json:"session_token"`
+	PathStyle           bool   `json:"path_style"`
+	PrivateEndpoint     bool   `json:"private_endpoint"`
+	BucketProtection    string `json:"bucket_protection"`
+	ProtectionState     string `json:"protection_state"`
+	ProtectionCheckedAt int64  `json:"protection_checked_at"`
+}
+
+// Target identifies one store. Cached knowledge of a bucket is keyed by it, so
+// changing endpoint, bucket or folder starts a fresh view instead of mixing two.
+func (s Settings) Target() string {
+	return Hash(strings.ToLower(s.Endpoint) + "|" + s.Bucket + "|" + strings.Trim(s.Prefix, "/"))
 }
 
 // Masked hides credentials for display while showing that they are set.
@@ -55,6 +83,17 @@ func (s Settings) Validate() error {
 	u, e := url.Parse(s.Endpoint)
 	if e != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Path != "" && u.Path != "/" {
 		return errors.New("endpoint must be an https:// URL without a path, for example https://s3.us-east-1.amazonaws.com")
+	}
+	if u.Scheme != "https" {
+		if !s.PrivateEndpoint {
+			return errors.New("the endpoint must use https:// unless it is a private endpoint on this network")
+		}
+		if e := privateHost(u.Hostname()); e != nil {
+			return e
+		}
+	}
+	if s.BucketProtection != ProtectionVersioning && s.BucketProtection != ProtectionAcknowledged {
+		return errors.New("choose how this bucket is protected against deletion")
 	}
 	if s.Bucket == "" || strings.ContainsAny(s.Bucket, "/ ") {
 		return errors.New("bucket name is required")
@@ -86,12 +125,18 @@ func New(s Settings) (*Client, error) {
 	if region == "" {
 		region = "us-east-1"
 	}
-	mc, e := minio.New(u.Host, &minio.Options{
+	options := &minio.Options{
 		Creds:        credentials.NewStaticV4(s.AccessKey, s.SecretKey, s.SessionToken),
 		Secure:       u.Scheme == "https",
 		Region:       region,
 		BucketLookup: lookup,
-	})
+	}
+	if s.PrivateEndpoint {
+		// Resolving the name once at save time would still allow a later answer
+		// to point somewhere public, so the address actually dialled is checked.
+		options.Transport = privateTransport()
+	}
+	mc, e := minio.New(u.Host, options)
 	if e != nil {
 		return nil, e
 	}
@@ -108,9 +153,10 @@ func (c *Client) BackupKey(dbName string, at time.Time) string {
 }
 
 type CheckStep struct {
-	Name  string `json:"name"`
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // Check exercises upload, listing, download with integrity, and cleanup of a
@@ -158,7 +204,21 @@ func (c *Client) Check(ctx context.Context) []CheckStep {
 	if e := c.mc.RemoveObject(ctx, c.settings.Bucket, key, minio.RemoveObjectOptions{}); e != nil {
 		return fail("cleanup", e)
 	}
-	return append(steps, CheckStep{Name: "cleanup", OK: true})
+	steps = append(steps, CheckStep{Name: "cleanup", OK: true})
+	state, e := c.Protection(ctx)
+	if e != nil {
+		return fail("protection", e)
+	}
+	step := CheckStep{Name: "protection", OK: true}
+	switch state {
+	case VersioningEnabled:
+		step.Detail = "the bucket keeps versions of deleted objects"
+	case VersioningDisabled:
+		step.OK, step.Error = false, "versioning is off for this bucket; a deleted backup cannot be recovered"
+	default:
+		step.Detail = "this provider does not report versioning; protection is the acknowledged setting"
+	}
+	return append(steps, step)
 }
 
 func describe(e error) string {
@@ -214,6 +274,78 @@ func (c *Client) ReadBytes(ctx context.Context, key string, limit int64) ([]byte
 	return b, nil
 }
 
+// privateHost refuses a plaintext endpoint that is not on this machine or a
+// private network.
+func privateHost(host string) error {
+	addresses, e := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if e != nil || len(addresses) == 0 {
+		return errors.New("the private endpoint's address could not be resolved")
+	}
+	for _, a := range addresses {
+		if !privateAddress(a.IP) {
+			return errors.New("a private endpoint must be a loopback or private network address")
+		}
+	}
+	return nil
+}
+
+func privateAddress(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+func privateTransport() *http.Transport {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: func(network, address string, _ syscall.RawConn) error {
+		host, _, e := net.SplitHostPort(address)
+		if e != nil {
+			return errors.New("the private endpoint address could not be read")
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !privateAddress(ip) {
+			return errors.New("the private endpoint resolved to a public address and was not contacted")
+		}
+		return nil
+	}}
+	return &http.Transport{DialContext: dialer.DialContext, ForceAttemptHTTP2: true, MaxIdleConns: 16, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: time.Second}
+}
+
+// Protection reports what the provider says about the bucket keeping versions
+// of deleted objects. Anything other than a clear answer fails closed: an
+// access-denied reply may be a supported API hidden by a narrow credential.
+func (c *Client) Protection(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	configuration, e := c.mc.GetBucketVersioning(ctx, c.settings.Bucket)
+	if e == nil {
+		if configuration.Enabled() {
+			return VersioningEnabled, nil
+		}
+		return VersioningDisabled, nil
+	}
+	var response minio.ErrorResponse
+	if errors.As(e, &response) {
+		switch response.Code {
+		case "NotImplemented", "MethodNotAllowed", "NotSupported", "UnsupportedOperation":
+			return VersioningUnsupported, nil
+		case "AccessDenied":
+			return "", errors.New("the credentials may not read the bucket's versioning setting; allow s3:GetBucketVersioning and try again")
+		}
+	}
+	return "", errors.New("the bucket's versioning setting could not be read: " + describe(e))
+}
+
+func Hash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+type ObjectCounts struct {
+	Sequences   int64 `json:"sequences"`
+	Views       int64 `json:"views"`
+	Functions   int64 `json:"functions"`
+	Indexes     int64 `json:"indexes"`
+	Constraints int64 `json:"constraints"`
+}
+
 type TableCount struct {
 	Schema string `json:"schema"`
 	Name   string `json:"name"`
@@ -222,67 +354,42 @@ type TableCount struct {
 
 // Manifest is published last; a backup without one is incomplete and ignored.
 type Manifest struct {
-	Version         int          `json:"version"`
-	InstallationID  string       `json:"installation_id"`
-	ProjectID       string       `json:"project_id"`
-	ProjectName     string       `json:"project_name"`
-	DBName          string       `json:"db_name"`
-	PostgresVersion string       `json:"postgres_version"`
-	CreatedAt       time.Time    `json:"created_at"`
-	ArchiveKey      string       `json:"archive_key"`
-	SHA256          string       `json:"sha256"`
-	SizeBytes       int64        `json:"size_bytes"`
-	Tables          []TableCount `json:"tables"`
-	ManifestKey     string       `json:"manifest_key,omitempty"`
+	Version         int           `json:"version"`
+	InstallationID  string        `json:"installation_id"`
+	ProjectID       string        `json:"project_id"`
+	ProjectName     string        `json:"project_name"`
+	DBName          string        `json:"db_name"`
+	PostgresVersion string        `json:"postgres_version"`
+	CreatedAt       time.Time     `json:"created_at"`
+	ArchiveKey      string        `json:"archive_key"`
+	SHA256          string        `json:"sha256"`
+	SizeBytes       int64         `json:"size_bytes"`
+	Tables          []TableCount  `json:"tables"`
+	TablesTruncated bool          `json:"tables_truncated,omitempty"`
+	Objects         *ObjectCounts `json:"objects,omitempty"`
+	ManifestKey     string        `json:"manifest_key,omitempty"`
 }
 
-// ListManifests discovers completed backups under the prefix, newest first.
-func (c *Client) ListManifests(ctx context.Context, limit int) ([]Manifest, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	var keys []string
-	for object := range c.mc.ListObjects(ctx, c.settings.Bucket, minio.ListObjectsOptions{Prefix: c.key("backups") + "/", Recursive: true}) {
-		if object.Err != nil {
-			return nil, errors.New(describe(object.Err))
-		}
-		if strings.HasSuffix(object.Key, "/manifest.json") {
-			keys = append(keys, object.Key)
-		}
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
-	if len(keys) > limit {
-		keys = keys[:limit]
-	}
-	out := []Manifest{}
-	for _, key := range keys {
-		b, e := c.ReadBytes(ctx, key, 1<<20)
-		if e != nil {
-			return nil, e
-		}
-		var m Manifest
-		if e := json.Unmarshal(b, &m); e != nil || m.Version != 1 {
-			continue // foreign or damaged manifests are not offered for restore
-		}
-		m.ManifestKey = key
-		out = append(out, m)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
-	return out, nil
-}
-
+// Manifest reads and fully validates one manifest. The restore path uses the
+// same layout rules as listing and retention, so a manifest that contradicts
+// where it lives can never be restored.
 func (c *Client) Manifest(ctx context.Context, key string) (Manifest, error) {
 	var m Manifest
-	if !strings.HasSuffix(key, "/manifest.json") || !strings.HasPrefix(key, c.key("backups")+"/") {
-		return m, errors.New("not a backup manifest in the configured prefix")
+	entry, e := c.EntryFor(key)
+	if e != nil {
+		return m, e
 	}
 	b, e := c.ReadBytes(ctx, key, 1<<20)
 	if e != nil {
 		return m, e
 	}
-	if e := json.Unmarshal(b, &m); e != nil || m.Version != 1 {
+	if e := json.Unmarshal(b, &m); e != nil {
 		return m, errors.New("the manifest is unreadable or from an unsupported version")
 	}
 	m.ManifestKey = key
+	if e := CheckManifest(m, entry); e != nil {
+		return m, errors.New("the backup's manifest does not match its location and will not be restored")
+	}
 	return m, nil
 }
 

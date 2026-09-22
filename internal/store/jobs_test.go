@@ -29,9 +29,9 @@ func TestJobQueueSingleHeavyJobAndInterruption(t *testing.T) {
 	if e = s.SetJobStage(ctx, "job_1", "dump", now); e != nil {
 		t.Fatal(e)
 	}
-	n, e := s.InterruptRunningJobs(ctx, now)
-	if e != nil || n != 1 {
-		t.Fatal(n, e)
+	interrupted, e := s.InterruptRunningJobs(ctx, now, 24*time.Hour)
+	if e != nil || len(interrupted) != 1 {
+		t.Fatal(interrupted, e)
 	}
 	got, _ := s.Job(ctx, "job_1")
 	if got.State != "interrupted" || got.Stage != "dump" || got.Error == "" {
@@ -47,10 +47,6 @@ func TestJobQueueSingleHeavyJobAndInterruption(t *testing.T) {
 	}
 	if e = s.RecordBackup(ctx, Backup{ID: "bk_1", ProjectID: p.ID, JobID: "job_2", ObjectKey: "k", Manifest: "{}", SizeBytes: 10, CreatedAt: now.Unix()}); e != nil {
 		t.Fatal(e)
-	}
-	last, _ := s.LastBackupAt(ctx)
-	if last[p.ID] != now.Unix() {
-		t.Fatal(last)
 	}
 	if e = s.SetSetting(ctx, "storage", "sealed-1", now); e != nil {
 		t.Fatal(e)

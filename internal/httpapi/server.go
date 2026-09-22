@@ -116,6 +116,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/settings/storage", s.getStorage)
 	mux.HandleFunc("PUT /api/v1/settings/storage", s.putStorage)
 	mux.HandleFunc("POST /api/v1/settings/storage/check", s.checkStorage)
+	mux.HandleFunc("GET /api/v1/settings/backups", s.getBackupPolicy)
+	mux.HandleFunc("PUT /api/v1/settings/backups", s.putBackupPolicy)
 	mux.HandleFunc("POST /api/v1/projects/{id}/backups", s.startBackup)
 	mux.HandleFunc("GET /api/v1/projects/{id}/backups", s.listBackups)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
@@ -387,7 +389,50 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	var sqliteVersion string
 	_ = s.Store.DB.QueryRowContext(r.Context(), "SELECT sqlite_version()").Scan(&sqliteVersion)
-	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": "not_configured", "database_access": s.databaseAccess()})
+	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": s.backupStatus(r), "database_access": s.databaseAccess()})
+}
+
+// backupStatus answers from the reconciled view in SQLite, so it stays cheap
+// and keeps working while PostgreSQL or the worker is down.
+func (s *Server) backupStatus(r *http.Request) string {
+	configured, target := s.storageTarget(r)
+	if !configured {
+		return "not_configured"
+	}
+	state, e := s.Store.StorageTarget(r.Context(), target)
+	if e != nil {
+		return "unavailable"
+	}
+	if state.ReconciledAt == 0 {
+		return "checking"
+	}
+	if failures, e := s.Store.BackupFailures(r.Context()); e == nil && len(failures) > 0 {
+		return "failing"
+	}
+	policy, e := s.Store.BackupPolicy(r.Context())
+	if e != nil {
+		return "unavailable"
+	}
+	projects, e := s.Store.Projects(r.Context())
+	if e != nil {
+		return "unavailable"
+	}
+	newest, e := s.Store.NewestRecoverable(r.Context(), target, s.Config.ID)
+	if e != nil {
+		return "unavailable"
+	}
+	// A backup older than 1.5 times the target is late enough to say so, and a
+	// ready project with no backup at all counts as late once due.
+	deadline := s.Now().Add(-3 * policy.Interval() / 2).Unix()
+	for _, p := range projects {
+		if p.Stage != "ready" || p.Failed {
+			continue
+		}
+		if at, ok := newest[p.ID]; (!ok && p.ReadyAt < deadline) || (ok && at < deadline) {
+			return "stale"
+		}
+	}
+	return "ok"
 }
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); ok {
