@@ -10,31 +10,47 @@ import (
 var ErrJobBusy = errors.New("another heavy job is already queued or running")
 
 type Job struct {
-	ID         string `json:"id"`
-	Kind       string `json:"kind"`
-	ProjectID  string `json:"project_id"`
-	State      string `json:"state"` // queued, running, succeeded, failed, interrupted
-	Stage      string `json:"stage"`
-	Error      string `json:"error"`
-	Input      string `json:"-"`
-	Result     string `json:"result"`
-	CreatedAt  int64  `json:"created_at"`
-	StartedAt  int64  `json:"started_at"`
-	FinishedAt int64  `json:"finished_at"`
-	StageAt    int64  `json:"stage_at"`
+	ID            string `json:"id"`
+	Kind          string `json:"kind"`
+	ProjectID     string `json:"project_id"`
+	State         string `json:"state"` // queued, running, succeeded, failed, interrupted
+	Stage         string `json:"stage"`
+	Error         string `json:"error"`
+	Input         string `json:"-"`
+	Result        string `json:"result"`
+	CreatedAt     int64  `json:"created_at"`
+	StartedAt     int64  `json:"started_at"`
+	FinishedAt    int64  `json:"finished_at"`
+	StageAt       int64  `json:"stage_at"`
+	Scheduled     bool   `json:"scheduled"`
+	TargetStorage string `json:"-"`
+	TargetKey     string `json:"-"`
 }
 
-const jobCols = "id,kind,COALESCE(project_id,''),state,stage,error,input,result,created_at,COALESCE(started_at,0),COALESCE(finished_at,0),COALESCE(stage_at,0)"
+const jobCols = "id,kind,COALESCE(project_id,''),state,stage,error,input,result,created_at,COALESCE(started_at,0),COALESCE(finished_at,0),COALESCE(stage_at,0),scheduled,target_storage,target_key"
 
 func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var j Job
-	e := row.Scan(&j.ID, &j.Kind, &j.ProjectID, &j.State, &j.Stage, &j.Error, &j.Input, &j.Result, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.StageAt)
+	var scheduled int
+	e := row.Scan(&j.ID, &j.Kind, &j.ProjectID, &j.State, &j.Stage, &j.Error, &j.Input, &j.Result, &j.CreatedAt, &j.StartedAt, &j.FinishedAt, &j.StageAt, &scheduled, &j.TargetStorage, &j.TargetKey)
+	j.Scheduled = scheduled != 0
 	return j, e
 }
 
 // EnqueueJob records a heavy job. Only one backup/restore may be queued or
 // running at a time so the small host is never asked to do two dumps at once.
 func (s *Store) EnqueueJob(ctx context.Context, id, kind, projectID, input string, now time.Time) (Job, error) {
+	return s.enqueue(ctx, id, kind, projectID, input, false, now)
+}
+
+// EnqueueBackupJob records the job and the attempt together. An attempt that
+// existed without its scheduling state would defeat the fairness ordering and
+// the failure backoff after a crash between the two writes.
+func (s *Store) EnqueueBackupJob(ctx context.Context, id, projectID, input string, scheduled bool, now time.Time) (Job, error) {
+	return s.enqueue(ctx, id, "backup", projectID, input, scheduled, now)
+}
+
+func (s *Store) enqueue(ctx context.Context, id, kind, projectID, input string, scheduled bool, now time.Time) (Job, error) {
 	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return Job{}, e
@@ -51,13 +67,31 @@ func (s *Store) EnqueueJob(ctx context.Context, id, kind, projectID, input strin
 	if projectID != "" {
 		project = projectID
 	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO jobs(id,kind,project_id,input,created_at) VALUES (?,?,?,?,?)", id, kind, project, input, now.Unix()); e != nil {
+	flag := 0
+	if scheduled {
+		flag = 1
+	}
+	if _, e = tx.ExecContext(ctx, "INSERT INTO jobs(id,kind,project_id,input,created_at,scheduled) VALUES (?,?,?,?,?,?)", id, kind, project, input, now.Unix(), flag); e != nil {
 		return Job{}, e
+	}
+	if kind == "backup" && projectID != "" {
+		if _, e = tx.ExecContext(ctx, `INSERT INTO backup_schedule(project_id,last_attempt_at) VALUES (?,?)
+			ON CONFLICT(project_id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at`, projectID, now.Unix()); e != nil {
+			return Job{}, e
+		}
 	}
 	if e = tx.Commit(); e != nil {
 		return Job{}, e
 	}
 	return s.Job(ctx, id)
+}
+
+// SetJobTarget records where a backup intends to write before it uploads
+// anything. Cleanup later needs this to prove an abandoned archive is ours and
+// not another installation's work in the same bucket.
+func (s *Store) SetJobTarget(ctx context.Context, id, target, key string) error {
+	_, e := s.DB.ExecContext(ctx, "UPDATE jobs SET target_storage=?, target_key=? WHERE id=?", target, key, id)
+	return e
 }
 
 func (s *Store) Job(ctx context.Context, id string) (Job, error) {
@@ -132,13 +166,96 @@ func (s *Store) FinishJob(ctx context.Context, id, state, stage, errorText, resu
 }
 
 // InterruptRunningJobs is called at startup: a job that was running when the
-// process died cannot have finished, so it is never reported as success.
-func (s *Store) InterruptRunningJobs(ctx context.Context, now time.Time) (int64, error) {
-	res, e := s.DB.ExecContext(ctx, "UPDATE jobs SET state='interrupted', error='The application restarted before this job finished.', finished_at=? WHERE state='running'", now.Unix())
+// process died cannot have finished, so it is never reported as success. An
+// interrupted scheduled backup counts as a failed attempt in the same
+// transaction, so a crash loop backs off instead of restarting immediately.
+func (s *Store) InterruptRunningJobs(ctx context.Context, now time.Time, interval time.Duration) ([]Job, error) {
+	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
-		return 0, e
+		return nil, e
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+	rows, e := tx.QueryContext(ctx, "SELECT "+jobCols+" FROM jobs WHERE state='running'")
+	if e != nil {
+		return nil, e
+	}
+	var running []Job
+	for rows.Next() {
+		j, e := scanJob(rows)
+		if e != nil {
+			rows.Close()
+			return nil, e
+		}
+		running = append(running, j)
+	}
+	rows.Close()
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	for _, j := range running {
+		if _, e = tx.ExecContext(ctx, "UPDATE jobs SET state='interrupted', error='The application restarted before this job finished.', finished_at=? WHERE id=?", now.Unix(), j.ID); e != nil {
+			return nil, e
+		}
+		if j.Kind == "backup" && j.Scheduled && j.ProjectID != "" {
+			if e = recordOutcome(ctx, tx, j.ProjectID, false, now, interval); e != nil {
+				return nil, e
+			}
+		}
+	}
+	if e = tx.Commit(); e != nil {
+		return nil, e
+	}
+	return running, nil
+}
+
+// CompleteBackupJob finishes a backup: the job row, its history row and the
+// schedule outcome are one transaction, so a crash can neither lose the backoff
+// nor record a backup the job never reported.
+func (s *Store) CompleteBackupJob(ctx context.Context, id, projectID, state, stage, errorText, result string, backup *Backup, scheduled bool, now time.Time, interval time.Duration) error {
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, "UPDATE jobs SET state=?, stage=?, error=?, result=?, finished_at=? WHERE id=?", state, stage, errorText, result, now.Unix(), id); e != nil {
+		return e
+	}
+	if backup != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO backups(id,project_id,job_id,object_key,manifest,size_bytes,created_at) VALUES (?,?,?,?,?,?,?)",
+			backup.ID, backup.ProjectID, backup.JobID, backup.ObjectKey, backup.Manifest, backup.SizeBytes, backup.CreatedAt); e != nil {
+			return e
+		}
+	}
+	if projectID != "" {
+		succeeded := state == "succeeded"
+		// A manual attempt can only help: success clears the backoff, while a
+		// manual failure never pushes the automatic schedule further out.
+		if succeeded || scheduled {
+			if e = recordOutcome(ctx, tx, projectID, succeeded, now, interval); e != nil {
+				return e
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+func recordOutcome(ctx context.Context, tx *sql.Tx, projectID string, succeeded bool, now time.Time, interval time.Duration) error {
+	if succeeded {
+		_, e := tx.ExecContext(ctx, `INSERT INTO backup_schedule(project_id,last_attempt_at,failures,next_attempt_at) VALUES (?,?,0,0)
+			ON CONFLICT(project_id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at, failures=0, next_attempt_at=0`, projectID, now.Unix())
+		return e
+	}
+	var failures int
+	e := tx.QueryRowContext(ctx, "SELECT failures FROM backup_schedule WHERE project_id=?", projectID).Scan(&failures)
+	if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		return e
+	}
+	failures++
+	next := now.Add(backoff(failures, interval)).Unix()
+	_, e = tx.ExecContext(ctx, `INSERT INTO backup_schedule(project_id,last_attempt_at,failures,next_attempt_at) VALUES (?,?,?,?)
+		ON CONFLICT(project_id) DO UPDATE SET last_attempt_at=excluded.last_attempt_at, failures=excluded.failures, next_attempt_at=excluded.next_attempt_at`,
+		projectID, now.Unix(), failures, next)
+	return e
 }
 
 type Backup struct {
@@ -169,25 +286,6 @@ func (s *Store) ProjectBackups(ctx context.Context, projectID string, limit int)
 			return nil, e
 		}
 		out = append(out, b)
-	}
-	return out, rows.Err()
-}
-
-// LastBackupAt returns the newest successful backup time per project.
-func (s *Store) LastBackupAt(ctx context.Context) (map[string]int64, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT project_id, max(created_at) FROM backups WHERE project_id IS NOT NULL GROUP BY project_id")
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := map[string]int64{}
-	for rows.Next() {
-		var id string
-		var at int64
-		if e := rows.Scan(&id, &at); e != nil {
-			return nil, e
-		}
-		out[id] = at
 	}
 	return out, rows.Err()
 }

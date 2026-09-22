@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/c-varun14/Pgfy/internal/jobs"
@@ -45,6 +46,7 @@ func (s *Server) putStorage(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	in.ProtectionState, in.ProtectionCheckedAt = "", 0
 	// Blank credentials keep the stored ones so the form can be resubmitted with masked values.
 	if existing, e := s.Jobs.StorageSettings(r.Context()); e == nil {
 		if in.AccessKey == "" || in.AccessKey == existing.Masked().AccessKey {
@@ -61,11 +63,43 @@ func (s *Server) putStorage(w http.ResponseWriter, r *http.Request) {
 		failure(w, 400, "invalid_storage", e.Error())
 		return
 	}
+	// Backups are only as safe as the bucket holding them, so the bucket is
+	// asked about its own protection before these settings are accepted.
+	state, e := s.checkProtection(r, in)
+	if e != nil {
+		failure(w, 400, "invalid_storage", e.Error())
+		return
+	}
+	in.ProtectionState, in.ProtectionCheckedAt = state, s.Now().Unix()
 	if e := s.Jobs.SaveStorageSettings(r.Context(), in); e != nil {
 		failure(w, 503, "metadata_unavailable", "Storage settings could not be saved.")
 		return
 	}
+	s.Jobs.Kick()
 	write(w, 200, map[string]any{"configured": true, "settings": in.Masked()})
+}
+
+// checkProtection refuses a bucket whose provider says versioning is off,
+// whichever protection the operator chose: an acknowledgment is for providers
+// that cannot answer, not a way past an answer nobody likes.
+func (s *Server) checkProtection(r *http.Request, in storage.Settings) (string, error) {
+	client, e := storage.New(in)
+	if e != nil {
+		return "", e
+	}
+	ctx, cancel := contextWithTimeout(r, 30*time.Second)
+	defer cancel()
+	state, e := client.Protection(ctx)
+	if e != nil {
+		return "", e
+	}
+	switch {
+	case state == storage.VersioningDisabled:
+		return "", errors.New("this bucket does not keep versions of deleted objects. Enable versioning on the bucket, then save again.")
+	case state == storage.VersioningUnsupported && in.BucketProtection == storage.ProtectionVersioning:
+		return "", errors.New("this provider does not report bucket versioning. Protect the bucket with the provider's own lock and acknowledge it instead.")
+	}
+	return state, nil
 }
 
 func (s *Server) checkStorage(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +163,7 @@ func (s *Server) startBackup(w http.ResponseWriter, r *http.Request) {
 		failure(w, 409, "storage_not_configured", "Configure backup storage in Settings before backing up.")
 		return
 	}
-	job, e := s.Store.EnqueueJob(r.Context(), "job_"+security.Token()[:16], "backup", p.ID, `{"scheduled":false}`, s.Now())
+	job, e := s.Store.EnqueueBackupJob(r.Context(), "job_"+security.Token()[:16], p.ID, `{"scheduled":false}`, false, s.Now())
 	if errors.Is(e, store.ErrJobBusy) {
 		failure(w, 409, "job_busy", "Another backup or restore is still running. Try again when it finishes.")
 		return
@@ -173,16 +207,75 @@ func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
 	for _, j := range history {
 		jobViews = append(jobViews, s.jobView(j))
 	}
-	configured := false
-	if s.Jobs != nil {
-		_, e := s.Jobs.StorageSettings(r.Context())
-		configured = e == nil
+	configured, target := s.storageTarget(r)
+	policy, _ := s.Store.BackupPolicy(r.Context())
+	schedule, _ := s.Store.BackupSchedule(r.Context(), p.ID)
+	// The age shown is the bucket's answer, not our history: a backup removed
+	// outside the application must not keep counting as recoverable.
+	var newest int64
+	if configured {
+		if recoverable, e := s.Store.NewestRecoverable(r.Context(), target, s.Config.ID); e == nil {
+			newest = recoverable[p.ID]
+		}
 	}
 	var next int64
-	if configured && len(backups) > 0 {
-		next = backups[0].CreatedAt + int64(jobs.ScheduleEvery/time.Second)
+	if configured && newest > 0 {
+		next = newest + int64(policy.Interval()/time.Second)
 	}
-	write(w, 200, map[string]any{"backups": views, "jobs": jobViews, "storage_configured": configured, "next_scheduled_at": next})
+	if schedule.NextAttemptAt > next {
+		next = schedule.NextAttemptAt
+	}
+	write(w, 200, map[string]any{"backups": views, "jobs": jobViews, "storage_configured": configured,
+		"next_scheduled_at": next, "newest_backup_at": newest, "target_interval_hours": policy.TargetIntervalHours,
+		"failures": schedule.Failures, "last_attempt_at": schedule.LastAttemptAt})
+}
+
+// storageTarget identifies the store in use, so cached knowledge of one bucket
+// is never shown for another.
+func (s *Server) storageTarget(r *http.Request) (bool, string) {
+	if s.Jobs == nil {
+		return false, ""
+	}
+	settings, e := s.Jobs.StorageSettings(r.Context())
+	if e != nil {
+		return false, ""
+	}
+	return true, settings.Target()
+}
+
+func (s *Server) getBackupPolicy(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := s.authorize(w, r); !ok {
+		return
+	}
+	policy, e := s.Store.BackupPolicy(r.Context())
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Backup settings could not be read.")
+		return
+	}
+	write(w, 200, policy)
+}
+
+func (s *Server) putBackupPolicy(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := s.authorize(w, r); !ok {
+		return
+	}
+	var in store.BackupPolicy
+	if !decode(w, r, &in) {
+		return
+	}
+	if e := s.Store.SetBackupPolicy(r.Context(), in, s.Now()); e != nil {
+		failure(w, 400, "invalid_policy", e.Error())
+		return
+	}
+	if s.Jobs != nil {
+		s.Jobs.Kick()
+	}
+	policy, e := s.Store.BackupPolicy(r.Context())
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Backup settings could not be read back.")
+		return
+	}
+	write(w, 200, policy)
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
@@ -201,25 +294,66 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, s.jobView(job))
 }
 
+type databaseGroup struct {
+	DBName         string               `json:"db_name"`
+	ProjectID      string               `json:"project_id,omitempty"`
+	ProjectName    string               `json:"project_name,omitempty"`
+	InstallationID string               `json:"installation_id,omitempty"`
+	Mixed          bool                 `json:"mixed"`
+	Foreign        bool                 `json:"foreign"`
+	NewestAt       int64                `json:"newest_at"`
+	Count          int                  `json:"count"`
+	TotalBytes     int64                `json:"total_bytes"`
+	HasMore        bool                 `json:"has_more"`
+	ManifestOnly   int                  `json:"manifest_only"`
+	Damaged        int                  `json:"damaged"`
+	ReconciledAt   int64                `json:"reconciled_at"`
+	Backups        []store.BucketBackup `json:"backups"`
+}
+
+const discoveryPage = 20
+
+// listRecoveryBackups serves the reconciled view of the bucket. Each database
+// is paged on its own, so no number of backups can hide one of them, and no
+// request pays for a listing of the whole store.
 func (s *Server) listRecoveryBackups(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); !ok || !s.jobsReady(w) {
 		return
 	}
-	client, e := s.Jobs.StorageClient(r.Context())
+	settings, e := s.Jobs.StorageSettings(r.Context())
 	if errors.Is(e, jobs.ErrStorageNotConfigured) {
-		write(w, 200, map[string]any{"state": "storage_not_configured", "backups": []storage.Manifest{}})
+		write(w, 200, map[string]any{"state": "storage_not_configured", "databases": []databaseGroup{}})
 		return
 	}
 	if e != nil {
 		failure(w, 400, "invalid_storage", e.Error())
 		return
 	}
-	ctx, cancel := contextWithTimeout(r, 60*time.Second)
-	defer cancel()
-	manifests, e := client.ListManifests(ctx, 200)
+	target := settings.Target()
+	state, e := s.Store.StorageTarget(r.Context(), target)
 	if e != nil {
-		write(w, 200, map[string]any{"state": "storage_error", "error": e.Error(), "backups": []storage.Manifest{}})
+		failure(w, 503, "metadata_unavailable", "Backups could not be read.")
 		return
+	}
+	if name := r.URL.Query().Get("db"); name != "" {
+		s.pageDatabase(w, r, target, name)
+		return
+	}
+	prefixes, e := s.Store.PrefixStates(r.Context(), target)
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Backups could not be read.")
+		return
+	}
+	groups := []databaseGroup{}
+	for _, prefix := range prefixes {
+		group, e := s.group(r, target, prefix)
+		if e != nil {
+			failure(w, 503, "metadata_unavailable", "Backups could not be read.")
+			return
+		}
+		if group.Count > 0 || group.ManifestOnly > 0 || group.Damaged > 0 {
+			groups = append(groups, group)
+		}
 	}
 	active, _ := s.Store.ActiveJobs(r.Context())
 	recent, _ := s.Store.RecentJobs(r.Context(), 20)
@@ -229,7 +363,67 @@ func (s *Server) listRecoveryBackups(w http.ResponseWriter, r *http.Request) {
 			restores = append(restores, s.jobView(j))
 		}
 	}
-	write(w, 200, map[string]any{"state": "ok", "backups": manifests, "installation_id": s.Config.ID, "busy": len(active) > 0, "restores": restores})
+	status := "ok"
+	if state.ReconciledAt == 0 {
+		status = "checking"
+	}
+	write(w, 200, map[string]any{"state": status, "databases": groups, "installation_id": s.Config.ID,
+		"reconciled_at": state.ReconciledAt, "storage_error": state.LastError, "busy": len(active) > 0, "restores": restores})
+}
+
+func (s *Server) group(r *http.Request, target string, prefix store.PrefixState) (databaseGroup, error) {
+	group := databaseGroup{DBName: prefix.DBName, Mixed: prefix.Mixed, Count: prefix.Complete,
+		ManifestOnly: prefix.ManifestOnly, Damaged: prefix.Damaged, ReconciledAt: prefix.ReconciledAt, Backups: []store.BucketBackup{}}
+	backups, more, e := s.Store.BucketBackups(r.Context(), target, prefix.DBName, 0, discoveryPage)
+	if e != nil {
+		return group, e
+	}
+	group.Backups, group.HasMore = backups, more
+	for _, b := range backups {
+		group.TotalBytes += b.SizeBytes
+	}
+	if len(backups) > 0 {
+		newest := backups[0]
+		group.NewestAt = newest.TakenAt
+		// Identity comes from the manifests themselves and only when they agree;
+		// a folder holding two installations' work claims neither.
+		if !prefix.Mixed {
+			group.ProjectID, group.ProjectName, group.InstallationID = newest.ProjectID, newest.ProjectName, newest.InstallationID
+			group.Foreign = newest.InstallationID != s.Config.ID
+		}
+	}
+	return group, nil
+}
+
+func (s *Server) pageDatabase(w http.ResponseWriter, r *http.Request, target, name string) {
+	if !storage.ValidDatabaseSegment(name) {
+		failure(w, 400, "invalid_request", "That is not a database folder written by this application.")
+		return
+	}
+	before := int64(0)
+	if value := r.URL.Query().Get("before"); value != "" {
+		at, e := time.Parse(storage.TimeLayout, value)
+		if e != nil {
+			failure(w, 400, "invalid_request", "Provide a backup timestamp to page from.")
+			return
+		}
+		before = at.Unix()
+	}
+	limit := discoveryPage
+	if value := r.URL.Query().Get("limit"); value != "" {
+		n, e := strconv.Atoi(value)
+		if e != nil || n < 1 || n > 100 {
+			failure(w, 400, "invalid_request", "Ask for between 1 and 100 backups.")
+			return
+		}
+		limit = n
+	}
+	backups, more, e := s.Store.BucketBackups(r.Context(), target, name, before, limit)
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Backups could not be read.")
+		return
+	}
+	write(w, 200, map[string]any{"db_name": name, "backups": backups, "has_more": more})
 }
 
 func (s *Server) startRestore(w http.ResponseWriter, r *http.Request) {
