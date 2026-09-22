@@ -20,10 +20,13 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 
 ## Planned, not implemented
 
-- Automated retention/cleanup of old backups (delete them in your bucket), external alerts, automatic certificate-renewal failure handling beyond the daily timer, IPv6 probing, DNS-01 issuance, PgBouncer, a SQL editor, team permissions, one-click updates.
+- Automated retention/cleanup of old backups, external alerts, a second factor for the dashboard, host-side admin reset, an update
+  procedure, credential rotation, connection budgets, project deletion, and the other items in the post-hackathon
+  [production-readiness roadmap](docs/phases.md#phase-6--post-demo-hardening-and-operation) (Phase 6). That work happens on the
+  `mvp-to-production` branch; `main` is the hackathon submission.
 - The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.
 
-This is a hackathon MVP with production-shaped foundations, not a production-ready service; run the post-demo hardening gate in [the phases document](docs/phases.md) before real workloads.
+This is a hackathon MVP with production-shaped foundations, not a production-ready service; complete the Phase 6 roadmap and gate in [the phases document](docs/phases.md#phase-6--post-demo-hardening-and-operation) before real workloads.
 
 ## Installation
 
