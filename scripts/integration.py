@@ -62,6 +62,7 @@ def main():
         secret_values = {"bootstrap_password": secrets.token_hex(32).encode(), "health_password": secrets.token_hex(32).encode(), "management_password": secrets.token_hex(32).encode(), "encryption_key": secrets.token_bytes(32)}
         for name, value in secret_values.items():
             (directory / "secrets" / name).write_bytes(value)
+        os.environ["PGFY_SCHEDULE_INTERVAL"] = "1m"  # scheduling passes the fixture can wait for
         (directory / "compose.env").write_text(host.compose_env(directory, dict(installation.state, images=dict(images, application=application_image)), cfg))
         base = ["docker", "compose", "--project-name", project, "--env-file", directory / "compose.env", "-f", ROOT / "deploy/compose.yaml"]
         def compose(*args, **kwargs):
@@ -218,14 +219,49 @@ def main():
             (directory / "minio/pgfy-backups").mkdir()
             run(["docker", "run", "-d", "--name", minio_name, "--network", project + "_proxy", "-e", "MINIO_ROOT_USER=pgfytest", "-e", "MINIO_ROOT_PASSWORD=" + minio_secret, "-v", f"{directory}/minio:/data", images["minio_test"], "server", "/data"])
             time.sleep(3)
-            storage = {"endpoint": f"http://{minio_name}:9000", "region": "us-east-1", "bucket": "pgfy-backups", "prefix": "pgfy/test", "access_key": "pgfytest", "secret_key": minio_secret, "session_token": "", "path_style": True}
+            storage = {"endpoint": f"http://{minio_name}:9000", "region": "us-east-1", "bucket": "pgfy-backups", "prefix": "pgfy/test", "access_key": "pgfytest", "secret_key": minio_secret, "session_token": "", "path_style": True, "private_endpoint": True, "bucket_protection": "versioning"}
+            # A plaintext endpoint is only allowed for a private address, and a bucket
+            # that reports versioning off is refused whichever protection is chosen.
+            assert request("/api/v1/settings/storage", dict(storage, private_endpoint=False), session["csrf_token"], "PUT")[0] == 400, "plaintext public endpoint accepted"
+            for protection in ("versioning", "acknowledged"):
+                code, refused = request("/api/v1/settings/storage", dict(storage, bucket_protection=protection), session["csrf_token"], "PUT")
+                assert code == 400 and "versioning" in str(refused), (protection, code, refused)
+            def mc(command, **kwargs):
+                # MinIO keeps each object as a directory of its own, so the fixture
+                # manipulates the bucket through the S3 API rather than the disk.
+                return run(["docker", "exec", "-i", minio_name, "sh", "-c", f"mc --quiet {command}"], **kwargs)
+            run(["docker", "exec", minio_name, "sh", "-c", f"mc alias set fixture http://127.0.0.1:9000 pgfytest {minio_secret}"])
+            mc("version enable fixture/pgfy-backups")
+            def clone_backup(db_name, source, folder, rows=None):
+                """Copy one backup to another timestamp, keeping the manifest consistent."""
+                base = f"fixture/pgfy-backups/pgfy/test/backups/{db_name}"
+                document = json.loads(mc(f"cat {base}/{source}/manifest.json").stdout)
+                at = time.strptime(folder, "%Y%m%dT%H%M%SZ")
+                document["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", at)
+                document["archive_key"] = document["archive_key"].replace(source, folder)
+                document["manifest_key"] = document["manifest_key"].replace(source, folder)
+                if rows is not None:
+                    for table in document["tables"]:
+                        table["rows"] = rows
+                mc(f"cp {base}/{source}/archive.dump {base}/{folder}/archive.dump")
+                mc(f"pipe {base}/{folder}/manifest.json", input=json.dumps(document))
+                return f"pgfy/test/backups/{db_name}/{folder}/manifest.json"
             code, saved = request("/api/v1/settings/storage", storage, session["csrf_token"], "PUT")
             assert code == 200 and saved["settings"]["secret_key"].startswith("••••") and minio_secret not in json.dumps(saved), (code, saved)
+            assert saved["settings"]["protection_state"] == "enabled", saved
             code, checked = request("/api/v1/settings/storage/check", {}, session["csrf_token"])
-            assert code == 200 and checked["ok"] and [s["name"] for s in checked["steps"]] == ["upload", "list", "download", "cleanup"], (code, checked)
-            code, discovered = request("/api/v1/recovery/backups")
-            assert code == 200 and discovered["state"] == "ok" and discovered["backups"] == [], discovered
-            passed("storage settings sealed and masked; upload/list/download/cleanup check passes")
+            assert code == 200 and checked["ok"] and [s["name"] for s in checked["steps"]] == ["upload", "list", "download", "cleanup", "protection"], (code, checked)
+            def discovery():
+                # An empty bucket is a complete answer, so reconciliation settles quickly.
+                for _ in range(30):
+                    code, body = request("/api/v1/recovery/backups")
+                    assert code == 200, (code, body)
+                    if body["state"] == "ok":
+                        return body
+                    time.sleep(1)
+                raise AssertionError(body)
+            assert discovery()["state"] == "ok", "the bucket was never read completely"
+            passed("storage protection required and verified; upload/list/download/cleanup/protection check passes")
             def wait_job(job_id, timeout=120):
                 deadline = time.monotonic() + timeout
                 while True:
@@ -235,17 +271,47 @@ def main():
                         return job
                     assert time.monotonic() < deadline, job
                     time.sleep(1)
+            def wait_idle(timeout=240):
+                deadline = time.monotonic() + timeout
+                while True:
+                    body = request("/api/v1/recovery/backups")[1]
+                    if not body.get("busy"):
+                        return body
+                    assert time.monotonic() < deadline, body
+                    time.sleep(1)
+            # Configuring storage makes every ready database overdue, so the
+            # schedule starts backing them up without anyone asking.
+            for _ in range(240):
+                histories = {name: request(f"/api/v1/projects/{item['id']}/backups")[1] for name, item in projects.items()}
+                if all(history["newest_backup_at"] for history in histories.values()):
+                    break
+                time.sleep(1)
+            assert all(history["newest_backup_at"] for history in histories.values()), histories
+            assert all(job["scheduled"] for history in histories.values() for job in history["jobs"] if job["kind"] == "backup"), histories
+            passed("scheduled backups start on their own once storage is configured")
+            wait_idle()
+            before = len(request(f"/api/v1/projects/{shop}/backups")[1]["backups"])
             code, job = request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])
             assert code == 202, (code, job)
             assert request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])[0] == 409, "second heavy job must wait"
             job = wait_job(job["id"])
             assert job["state"] == "succeeded" and job["result"]["sha256"] and job["result"]["tables"] == [{"schema": "public", "name": "guestbook", "rows": 1}], job
+            assert job["result"]["objects"], "object baselines were not captured"
             code, history = request(f"/api/v1/projects/{shop}/backups")
-            assert code == 200 and len(history["backups"]) == 1 and history["next_scheduled_at"] > 0 and history["storage_configured"], history
+            assert code == 200 and len(history["backups"]) == before + 1 and history["next_scheduled_at"] > 0 and history["storage_configured"], history
+            assert history["target_interval_hours"] == 24 and history["failures"] == 0, history
             manifest_key = history["backups"][0]["object_key"]
+            # The age the dashboard shows comes from the bucket, not from history.
+            for _ in range(30):
+                history = request(f"/api/v1/projects/{shop}/backups")[1]
+                if history["newest_backup_at"]:
+                    break
+                time.sleep(1)
+            assert history["newest_backup_at"] == history["backups"][0]["created_at"], history
             assert (directory / "minio/pgfy-backups/pgfy/test/backups" / projects["Shop"]["db_name"]).exists()
             passed("manual backup dumps within one snapshot, uploads archive then manifest, records history")
             # An upload that cannot finish must never become a published backup after a restart.
+            blog_recoverable = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]["newest_backup_at"]
             run(["docker", "pause", minio_name])
             code, stuck = request(f"/api/v1/projects/{projects['Blog']['id']}/backups", {}, session["csrf_token"])
             assert code == 202, (code, stuck)
@@ -259,17 +325,49 @@ def main():
             run(["docker", "unpause", minio_name])
             interrupted = request(f"/api/v1/jobs/{stuck['id']}")[1]
             assert interrupted["state"] == "interrupted" and interrupted["stage"] == "upload_archive", interrupted
-            # The schedule notices Blog has no backup yet and catches up after the restart; the
-            # interrupted job itself must never have published a manifest.
-            for _ in range(90):
+            # The half-finished upload must never become a recoverable backup: its
+            # archive is in the bucket, but without a manifest nothing offers it.
+            blog_before = blog_recoverable
+            for _ in range(60):
                 blog_history = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]
-                if blog_history["backups"] and not any(j["state"] in ("queued", "running") for j in blog_history["jobs"]):
+                if not any(j["state"] in ("queued", "running") for j in blog_history["jobs"]):
                     break
                 time.sleep(1)
-            assert blog_history["backups"] and blog_history["backups"][0]["job_id"] != stuck["id"], blog_history
-            assert {j["state"] for j in blog_history["jobs"]} == {"interrupted", "succeeded"}, blog_history["jobs"]
+            assert blog_history["newest_backup_at"] == blog_before, ("an interrupted upload became recoverable", blog_history)
+            assert all(j["id"] != stuck["id"] for j in blog_history["jobs"] if j["state"] == "succeeded"), blog_history["jobs"]
+            assert "interrupted" in {j["state"] for j in blog_history["jobs"]}, blog_history["jobs"]
+            blog_group = next(g for g in discovery()["databases"] if g["db_name"] == projects["Blog"]["db_name"])
+            assert all(b["state"] == "complete" for b in blog_group["backups"]), blog_group
             assert run([*helper, "ls -A /fixture/data/work"]).stdout.strip() == "", "workspace not cleaned"
-            passed("restart marks the in-flight backup interrupted without a manifest; the daily schedule catches up; workspace clean")
+            passed("restart marks the in-flight backup interrupted, its archive never becomes recoverable, workspace clean")
+            # Discovery lists every database separately, newest first, and the
+            # incomplete upload left behind is hidden rather than offered.
+            found = discovery()
+            groups = {group["db_name"]: group for group in found["databases"]}
+            assert set(groups) == {projects["Shop"]["db_name"], projects["Blog"]["db_name"]}, found
+            for group in groups.values():
+                assert group["count"] >= 1 and not group["foreign"] and not group["mixed"], group
+                assert [b["taken_at"] for b in group["backups"]] == sorted((b["taken_at"] for b in group["backups"]), reverse=True), group
+                assert all(b["state"] == "complete" for b in group["backups"]), group
+            assert groups[projects["Blog"]["db_name"]]["project_id"] == projects["Blog"]["id"], groups
+            assert request("/api/v1/recovery/backups?db=../etc")[0] == 400
+            assert request(f"/api/v1/recovery/backups?db={projects['Shop']['db_name']}&limit=500")[0] == 400
+            passed("discovery pages each database newest first and hides incomplete work")
+            # A backup removed from the bucket stops counting as recoverable, so the
+            # dashboard never offers something that is no longer there.
+            shop_backups = groups[projects["Shop"]["db_name"]]["backups"]
+            mc(f"rm fixture/pgfy-backups/{shop_backups[0]['manifest_key']}")
+            request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])  # the next backup reconciles the bucket
+            for _ in range(90):
+                history = request(f"/api/v1/projects/{shop}/backups")[1]
+                if not any(b["object_key"] == shop_backups[0]["manifest_key"] for b in history["backups"]):
+                    break
+                time.sleep(1)
+            assert not any(b["object_key"] == shop_backups[0]["manifest_key"] for b in history["backups"]), history
+            assert all(b["manifest_key"] != shop_backups[0]["manifest_key"] for g in discovery()["databases"] for b in g["backups"])
+            passed("a backup deleted outside the application stops being offered and stops counting as recoverable")
+            # Restore whatever is newest now: earlier checks deliberately removed a backup.
+            manifest_key = request(f"/api/v1/projects/{shop}/backups")[1]["backups"][0]["object_key"]
             code, restore = request("/api/v1/recovery/restores", {"manifest_key": manifest_key, "name": "Shop restored"}, session["csrf_token"])
             assert code == 202, (code, restore)
             job = wait_job(restore["job"]["id"], 180)
@@ -281,8 +379,82 @@ def main():
             assert psql(remote_url("Restored"), "SELECT entry FROM guestbook;").stdout.strip() == "hello from shop"
             assert "after restore" in psql(remote_url("Restored"), "INSERT INTO guestbook VALUES ('after restore') RETURNING entry;").stdout
             assert psql(remote_url("Shop"), "SELECT count(*) FROM guestbook;").stdout.strip() == "1", "original database must stay untouched"
-            assert request("/api/v1/recovery/restores", {"manifest_key": "pgfy/test/backups/nope/manifest.json", "name": "x"}, session["csrf_token"])[0] == 400
-            passed("restore into a new project verifies checksum, row counts, ownership; original untouched")
+            assert job["result"]["verification"] == "verified", job
+            for bad in ("pgfy/test/backups/nope/manifest.json", "pgfy/test/backups/app_x/latest/manifest.json", manifest_key.replace("manifest.json", "archive.dump")):
+                assert request("/api/v1/recovery/restores", {"manifest_key": bad, "name": "x"}, session["csrf_token"])[0] == 400, bad
+            passed("restore into a new project verifies checksum, row counts, objects, ownership; original untouched")
+            # A restore that cannot be fully verified says so, and still leaves a
+            # usable database rather than hiding it behind a failed job.
+            folder = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() - 2 * 86400))
+            doubtful = clone_backup(projects["Shop"]["db_name"], manifest_key.split("/")[-2], folder, rows=99)
+            code, restore = request("/api/v1/recovery/restores", {"manifest_key": doubtful, "name": "Shop doubtful"}, session["csrf_token"])
+            assert code == 202, (code, restore)
+            job = wait_job(restore["job"]["id"], 180)
+            assert job["state"] == "succeeded" and job["result"]["verification"] == "failed" and not job["result"]["verified"], job
+            assert any(not c["ok"] for c in job["result"]["checks"]), job["result"]["checks"]
+            doubtful_project = request(f"/api/v1/projects/{restore['project']['id']}")[1]["project"]
+            assert doubtful_project["stage"] == "ready", doubtful_project
+            projects["Doubtful"] = dict(restore["project"], credentials=request(f"/api/v1/projects/{restore['project']['id']}/credentials")[1])
+            assert psql(remote_url("Doubtful"), "SELECT entry FROM guestbook;").stdout.strip() == "hello from shop"
+            passed("a restore that cannot be verified says so and still leaves a usable database")
+            # Retention keeps the last day whole, then one backup per older day.
+            # Older backups are made by copying one to an earlier timestamp, with
+            # the manifest kept consistent with the folder holding it.
+            def shop_objects():
+                # Listed recursively: a versioned bucket keeps showing a folder whose
+                # objects are all deleted, so only real objects are counted here.
+                listing = mc(f"ls --recursive fixture/pgfy-backups/pgfy/test/backups/{projects['Shop']['db_name']}/").stdout
+                found = {}
+                for line in listing.splitlines():
+                    if "/" in line:
+                        folder, name = line.split()[-1].split("/")[-2:]
+                        found.setdefault(folder, set()).add(name)
+                return found
+            newest = sorted(shop_objects())[-1]
+            aged = []
+            for days in (10, 20):
+                folder = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() - days * 86400))
+                clone_backup(projects["Shop"]["db_name"], newest, folder)
+                aged.append(folder)
+            assert request("/api/v1/settings/backups", {"target_interval_hours": 24, "retention_daily": 1, "retention_weekly": 0}, session["csrf_token"], "PUT")[0] == 200
+            code, job = request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])
+            assert code == 202, (code, job)
+            assert wait_job(job["id"])["state"] == "succeeded"
+            for _ in range(60):
+                objects = shop_objects()
+                if not set(objects) & set(aged):
+                    break
+                time.sleep(1)
+            assert not set(objects) & set(aged), ("expired backups were kept", objects)
+            # Nothing is left half-deleted: every backup still offered has both
+            # objects, and the aged copies took their archives with them.
+            history = request(f"/api/v1/projects/{shop}/backups")[1]
+            offered = {b["object_key"].split("/")[-2] for b in history["backups"]}
+            assert offered and all(objects[folder] == {"manifest.json", "archive.dump"} for folder in offered), (offered, objects)
+            assert offered == {folder for folder, names in objects.items() if "manifest.json" in names}, (offered, objects)
+            passed("retention prunes older days to one backup each and leaves no manifest without its archive")
+            # Starvation regression: the oldest project is the one whose backups
+            # fail, which is exactly the case the previous scheduler never got
+            # past. Both projects are made due by emptying their folders, and the
+            # restored project's backup makes the application read the bucket again.
+            sql(f"ALTER DATABASE {projects['Shop']['db_name']} WITH ALLOW_CONNECTIONS false;")
+            for name in ("Shop", "Blog"):
+                mc(f"rm --recursive --force fixture/pgfy-backups/pgfy/test/backups/{projects[name]['db_name']}/")
+            code, job = request(f"/api/v1/projects/{projects['Restored']['id']}/backups", {}, session["csrf_token"])
+            assert code == 202, (code, job)
+            assert wait_job(job["id"])["state"] == "succeeded"
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                shop_schedule = request(f"/api/v1/projects/{shop}/backups")[1]
+                blog_history = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]
+                if shop_schedule["failures"] > 0 and blog_history["newest_backup_at"]:
+                    break
+                time.sleep(2)
+            assert shop_schedule["failures"] > 0, ("the failing project recorded no failure", shop_schedule["failures"], shop_schedule["jobs"][:2])
+            assert shop_schedule["next_scheduled_at"] > time.time(), ("no backoff after a failure", shop_schedule["next_scheduled_at"])
+            assert blog_history["newest_backup_at"], ("a failing project blocked another project's backup", blog_history["jobs"][:2])
+            sql(f"ALTER DATABASE {projects['Shop']['db_name']} WITH ALLOW_CONNECTIONS true;")
+            passed("a failing backup backs off and never blocks another project's schedule")
             sql("CREATE TABLE pgfy_internal.recognizable (value text); INSERT INTO pgfy_internal.recognizable VALUES ('phase-one-record');")
             volumes_before = sorted(m["Name"] for item in inspected for m in item["Mounts"] if m["Type"] == "volume")
             compose("restart")

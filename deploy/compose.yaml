@@ -17,6 +17,9 @@ services:
     environment:
       PGFY_TRUSTED_PROXY: ${PROXY_SUBNET:?proxy subnet is required}
       PGFY_TUNNEL_SOURCE: ${TUNNEL_SOURCE:?tunnel source address is required}
+      # How often overdue projects are considered; the backup target interval
+      # itself is a dashboard setting. Bounded to 1 minute–1 hour by the app.
+      PGFY_SCHEDULE_INTERVAL: ${SCHEDULE_INTERVAL:-5m}
     volumes:
       - ${INSTALL_DIR}/data/sqlite:/data
       - ${INSTALL_DIR}/data/work:/work

@@ -156,12 +156,20 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-w.kick:
+			// New or changed storage settings: read the bucket before deciding
+			// anything, so "no backup" is never confused with "not looked yet".
+			if w.reconcileIfUnknown(ctx) {
+				w.scheduleBackups(ctx)
+			}
 		case <-reconcile.C:
 			w.Reconcile(ctx)
 			w.scheduleBackups(ctx)
 		case <-schedule.C:
 			w.scheduleBackups(ctx)
 		case <-time.After(time.Minute):
+			if w.reconcileIfUnknown(ctx) {
+				w.scheduleBackups(ctx)
+			}
 		}
 	}
 }
@@ -377,11 +385,22 @@ type Check struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// Verification states. "partial" is the honest answer when every comparison
+// passed but the backup could not support the full set of them.
+const (
+	VerificationVerified = "verified"
+	VerificationPartial  = "partial"
+	VerificationFailed   = "failed"
+)
+
 type RestoreResult struct {
-	ProjectID string  `json:"project_id,omitempty"`
-	Verified  bool    `json:"verified"`
-	Checks    []Check `json:"checks,omitempty"`
-	Warnings  string  `json:"warnings,omitempty"`
+	ProjectID     string  `json:"project_id,omitempty"`
+	Verification  string  `json:"verification"`
+	Verified      bool    `json:"verified"`
+	Summary       string  `json:"summary,omitempty"`
+	RestoreErrors int     `json:"restore_errors,omitempty"`
+	Stderr        string  `json:"stderr,omitempty"`
+	Checks        []Check `json:"checks,omitempty"`
 }
 
 type restoreInput struct {
@@ -455,11 +474,12 @@ func (w *Worker) runRestore(ctx context.Context, job store.Job) (RestoreResult, 
 
 	w.stage(ctx, job, "restore")
 	// Objects are created as the new project role, never as the management or bootstrap role.
-	restoreErr := w.tool(ctx, passfile, 2*time.Hour, "pg_restore", "--no-owner", "--no-privileges", "--role="+project.RoleName, "--host=postgres", "--port=5432", "--username=pgfy_mgmt", "--dbname="+project.DBName, archive)
-	if restoreErr != nil {
-		// pg_restore exits non-zero for warnings too; verification below decides.
-		result.Warnings = restoreErr.Error()
+	run := w.run(ctx, passfile, 2*time.Hour, "pg_restore", "--no-owner", "--no-privileges", "--role="+project.RoleName, "--host=postgres", "--port=5432", "--username=pgfy_mgmt", "--dbname="+project.DBName, archive)
+	if run.Err != nil {
+		// The restore never ran, or was stopped: nothing about it can be claimed.
+		return result, run.Err
 	}
+	result.RestoreErrors, result.Stderr = run.Errors, run.Excerpt
 
 	w.stage(ctx, job, "verify")
 	conn, e := w.PG.Connect(ctx, project.DBName)
@@ -467,16 +487,32 @@ func (w *Worker) runRestore(ctx context.Context, job store.Job) (RestoreResult, 
 		return result, errors.New("PostgreSQL is not reachable for verification")
 	}
 	defer conn.Close(context.Background())
-	result.Checks, result.Verified = verifyRestore(ctx, conn, manifest, project.RoleName)
-	if !result.Verified {
-		return result, errors.New("the restore finished but verification found differences; review the checks before relying on this database")
+	checks, state := verifyRestore(ctx, conn, manifest, project.RoleName)
+	result.Checks = checks
+	// pg_restore can ignore errors and still exit zero, so the count decides too.
+	reported := run.Exit != 0 || run.Errors > 0
+	if reported {
+		state = VerificationFailed
 	}
+	result.Verification, result.Verified = state, state == VerificationVerified
+	switch {
+	case reported:
+		result.Summary = fmt.Sprintf("Completed with %d restore errors (%s). The database exists and can be inspected, but it is not verified.", run.Errors, run.Counted)
+	case state == VerificationPartial:
+		result.Summary = "Restored. Every check that this backup supports passed, but it does not carry the full set of baselines."
+	case state == VerificationFailed:
+		result.Summary = "Restored, but verification found differences. Review the checks before relying on this database."
+	default:
+		result.Summary = "Restored and verified against the baselines recorded at backup time."
+	}
+	// The database exists either way, so the job reports what happened rather
+	// than hiding a usable database behind a failed job.
 	return result, nil
 }
 
-func verifyRestore(ctx context.Context, conn *pgx.Conn, manifest storage.Manifest, role string) ([]Check, bool) {
+func verifyRestore(ctx context.Context, conn *pgx.Conn, manifest storage.Manifest, role string) ([]Check, string) {
 	checks := []Check{}
-	ok := true
+	ok, full := true, true
 	var count int64
 	for _, t := range manifest.Tables {
 		e := conn.QueryRow(ctx, "SELECT count(*) FROM "+pgx.Identifier{t.Schema, t.Name}.Sanitize()).Scan(&count)
@@ -491,6 +527,33 @@ func verifyRestore(ctx context.Context, conn *pgx.Conn, manifest storage.Manifes
 	}
 	if len(manifest.Tables) == 0 {
 		checks = append(checks, Check{Name: "schema", OK: true, Detail: "the backup contained no user tables"})
+	}
+	if manifest.TablesTruncated {
+		full = false
+		checks = append(checks, Check{Name: "table coverage", OK: true, Detail: fmt.Sprintf("row counts cover the first %d tables recorded by this backup", len(manifest.Tables))})
+	}
+	if manifest.Objects == nil {
+		full = false
+		checks = append(checks, Check{Name: "database objects", OK: true, Detail: "this backup predates object counts, so only tables could be compared"})
+	} else {
+		counts, e := restoredObjects(ctx, conn)
+		for _, c := range []struct {
+			name           string
+			backup, actual int64
+		}{
+			{"sequences", manifest.Objects.Sequences, counts.Sequences},
+			{"views", manifest.Objects.Views, counts.Views},
+			{"functions", manifest.Objects.Functions, counts.Functions},
+			{"indexes", manifest.Objects.Indexes, counts.Indexes},
+			{"constraints", manifest.Objects.Constraints, counts.Constraints},
+		} {
+			check := Check{Name: c.name, OK: e == nil && c.actual == c.backup, Detail: fmt.Sprintf("%d restored, %d in backup", c.actual, c.backup)}
+			if e != nil {
+				check.Detail = "the count could not be read after restore"
+			}
+			ok = ok && check.OK
+			checks = append(checks, check)
+		}
 	}
 	var foreign int
 	e := conn.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') AND tableowner<>$1", role).Scan(&foreign)
@@ -509,7 +572,28 @@ func verifyRestore(ctx context.Context, conn *pgx.Conn, manifest storage.Manifes
 		perm.Detail = "the new project user cannot connect"
 	}
 	ok = ok && perm.OK
-	return append(checks, perm), ok
+	checks = append(checks, perm)
+	switch {
+	case !ok:
+		return checks, VerificationFailed
+	case !full:
+		return checks, VerificationPartial
+	}
+	return checks, VerificationVerified
+}
+
+// restoredObjects counts what the restored database actually contains, to
+// compare against the baselines the backup recorded.
+func restoredObjects(ctx context.Context, conn *pgx.Conn) (storage.ObjectCounts, error) {
+	var c storage.ObjectCounts
+	e := conn.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='S' AND n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'),
+		(SELECT count(*) FROM pg_views WHERE schemaname NOT IN ('pg_catalog','information_schema')),
+		(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema')),
+		(SELECT count(*) FROM pg_indexes WHERE schemaname NOT IN ('pg_catalog','information_schema')),
+		(SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema'))`).
+		Scan(&c.Sequences, &c.Views, &c.Functions, &c.Indexes, &c.Constraints)
+	return c, e
 }
 
 // countTables records one row count per table from the dump's own snapshot.
