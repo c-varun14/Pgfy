@@ -419,3 +419,28 @@ func TestAbandonedUploadsNeedProvenance(t *testing.T) {
 		t.Fatal("our own abandoned upload was not cleaned up")
 	}
 }
+
+// An hourly schedule must not have today's backups thinned to one the moment
+// the next lands; older days are still reduced to one backup each.
+func TestRetentionKeepsTheLastDayWhole(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	w, s := testWorker(t, now)
+	ctx := context.Background()
+	fake := newFakeStore()
+	for _, stamp := range []string{"20260301T110000Z", "20260301T100000Z", "20260301T090000Z", "20260227T110000Z", "20260227T100000Z"} {
+		fake.put("app_shop", stamp, manifestFor("prj_shop", "Shop"))
+	}
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 1, RetentionDaily: 3, RetentionWeekly: 0}, now); e != nil {
+		t.Fatal(e)
+	}
+	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
+		t.Fatal(e)
+	}
+	kept, _ := s.PrefixBackups(ctx, testSettings().Target(), "app_shop")
+	if len(kept) != 4 {
+		t.Fatal("expected today's three backups and the newest of the older day", stamps(kept))
+	}
+	if fake.has("pgfy/backups/app_shop/20260227T100000Z/archive.dump") {
+		t.Fatal("an older day was not thinned to its newest backup")
+	}
+}

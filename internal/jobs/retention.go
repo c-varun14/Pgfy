@@ -43,6 +43,22 @@ func (w *Worker) Reconcile(ctx context.Context) {
 	}
 }
 
+// reconcileIfUnknown reads the bucket when the active store has never been
+// read completely, and reports whether it now has an answer to work from.
+func (w *Worker) reconcileIfUnknown(ctx context.Context) bool {
+	settings, e := w.StorageSettings(ctx)
+	if e != nil {
+		return false
+	}
+	state, e := w.Store.StorageTarget(ctx, settings.Target())
+	if e != nil || state.ReconciledAt > 0 {
+		return false
+	}
+	w.Reconcile(ctx)
+	state, e = w.Store.StorageTarget(ctx, settings.Target())
+	return e == nil && state.ReconciledAt > 0
+}
+
 func (w *Worker) reconcile(ctx context.Context, client objectStore, settings storage.Settings) error {
 	target := settings.Target()
 	if e := w.Store.ActivateStorageTarget(ctx, store.StorageTarget{Target: target, Endpoint: settings.Endpoint, Bucket: settings.Bucket, Prefix: settings.Prefix}); e != nil {
@@ -212,8 +228,10 @@ func blockedByForeignContent(backups []store.BucketBackup, installationID string
 	return ""
 }
 
-// selectExpired keeps the newest backup, then the newest of each of the most
-// recent days and weeks; everything else in this installation's own set expires.
+// selectExpired keeps everything from the last day, then the newest backup of
+// each of the most recent days and weeks. Keeping the last day whole matters
+// when the target interval is sub-daily: an hourly schedule should not have
+// today's backups thinned to one the moment the next one lands.
 func selectExpired(backups []store.BucketBackup, policy store.BackupPolicy, now time.Time) []store.BucketBackup {
 	var complete []store.BucketBackup
 	for _, b := range backups {
@@ -226,8 +244,12 @@ func selectExpired(backups []store.BucketBackup, policy store.BackupPolicy, now 
 	}
 	keep := map[string]bool{complete[0].ManifestKey: true} // rows arrive newest first
 	days, weeks := map[string]bool{}, map[string]bool{}
+	recent := now.Add(-24 * time.Hour)
 	for _, b := range complete {
 		at := time.Unix(b.TakenAt, 0).UTC()
+		if at.After(recent) {
+			keep[b.ManifestKey] = true
+		}
 		day := at.Format("2006-01-02")
 		year, week := at.ISOWeek()
 		weekKey := fmt.Sprintf("%d-%02d", year, week)
