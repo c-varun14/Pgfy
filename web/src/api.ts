@@ -134,8 +134,19 @@ export type StorageSettings = {
   secret_key: string;
   session_token: string;
   path_style: boolean;
+  private_endpoint: boolean;
+  /** How the bucket is protected against a deleted backup being unrecoverable. */
+  bucket_protection: "versioning" | "acknowledged" | "";
+  protection_state?: "enabled" | "disabled" | "unsupported" | "";
+  protection_checked_at?: number;
 };
-export type CheckStep = { name: string; ok: boolean; error?: string };
+export type BackupPolicy = {
+  target_interval_hours: number;
+  retention_daily: number;
+  retention_weekly: number;
+  updated_at: number;
+};
+export type CheckStep = { name: string; ok: boolean; error?: string; detail?: string };
 export type Job = {
   id: string;
   kind: "backup" | "restore";
@@ -147,8 +158,12 @@ export type Job = {
     sha256?: string;
     size_bytes?: number;
     verified?: boolean;
+    verification?: "verified" | "partial" | "failed";
+    summary?: string;
+    restore_errors?: number;
+    stderr?: string;
+    tables_truncated?: boolean;
     checks?: { name: string; ok: boolean; detail?: string }[];
-    warnings?: string;
     project_id?: string;
   };
   created_at: number;
@@ -169,7 +184,58 @@ export type Manifest = {
   sha256: string;
   size_bytes: number;
   tables: { schema: string; name: string; rows: number }[];
+  tables_truncated?: boolean;
   manifest_key: string;
+};
+/** One backup as the bucket currently holds it. */
+export type BucketBackup = {
+  manifest_key: string;
+  archive_key: string;
+  db_name: string;
+  taken_at: number;
+  state: "complete" | "manifest_only" | "archive_only" | "damaged";
+  installation_id: string;
+  project_id: string;
+  project_name: string;
+  postgres_version: string;
+  table_count: number;
+  size_bytes: number;
+};
+/** Every backup of one database, paged on its own so none can be hidden. */
+export type DatabaseBackups = {
+  db_name: string;
+  project_id?: string;
+  project_name?: string;
+  installation_id?: string;
+  mixed: boolean;
+  foreign: boolean;
+  newest_at: number;
+  count: number;
+  total_bytes: number;
+  has_more: boolean;
+  manifest_only: number;
+  damaged: number;
+  reconciled_at: number;
+  backups: BucketBackup[];
+};
+export type Discovery = {
+  state: "ok" | "checking" | "storage_not_configured";
+  databases: DatabaseBackups[];
+  installation_id?: string;
+  reconciled_at?: number;
+  storage_error?: string;
+  busy?: boolean;
+  restores?: Job[];
+};
+export type BackupHistory = {
+  backups: BackupRecord[];
+  jobs: Job[];
+  storage_configured: boolean;
+  next_scheduled_at: number;
+  newest_backup_at: number;
+  target_interval_hours: number;
+  failures: number;
+  last_attempt_at: number;
 };
 export type BackupRecord = {
   id: string;
