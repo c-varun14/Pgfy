@@ -115,7 +115,7 @@ The installation contains:
 | `state.json` | Installed release, image digests, persistent volume identities |
 | `config/` | Host-managed dashboard origin, Caddy configuration, PostgreSQL access policy (`pg/pg_hba.conf`), database TLS material (`postgres-tls/`) |
 | `config/pg/managed/` | Dashboard-written project access rules (`projects.conf`), included by the host policy; the only PostgreSQL configuration the app can write |
-| `data/sqlite/` | Administrator, hashed sessions/setup tokens, projects, sealed credentials, jobs, sealed storage settings |
+| `data/sqlite/` | Administrator, hashed sessions/setup tokens, projects, sealed credentials, jobs, sealed storage settings, backup policy and the reconciled view of the bucket |
 | `data/work/` | Disk-backed workspace for backup/restore archives; emptied at application start |
 | `secrets/encryption_key` | Recoverable-secret encryption key, separately protected from SQLite |
 | `secrets/bootstrap_password` | PostgreSQL bootstrap credential, never mounted into the app |
@@ -137,6 +137,24 @@ The app creates no fresh SQLite database during normal startup. Missing metadata
 - **Hostname-change interruption:** use host rollback; explicitly enable tunnel mode if necessary.
 
 Diagnostics print safe state, not raw credentials or container logs. Operators can inspect restricted logs through Docker on the host. Do not share unreviewed logs or the installation's secret files.
+
+## Backup storage credentials
+
+The operator supplies an existing private bucket and scoped keys. Pgfy never creates buckets or changes their
+configuration. Grant the key `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` and `s3:ListBucket` on the
+backup folder, plus `s3:GetBucketVersioning` so Pgfy can confirm the bucket keeps versions of deleted objects.
+Deny `s3:DeleteObjectVersion` and every bucket-configuration action (`s3:PutBucketVersioning`,
+`s3:PutBucketPolicy`, `s3:PutLifecycleConfiguration`, …): retention deletes objects, and versioning is what
+makes that recoverable. Turn on the provider's encryption at rest for the bucket.
+
+Storage settings will not save unless the bucket is protected. If the provider reports versioning is off,
+enable it and save again. If the provider cannot report versioning at all (Cloudflare R2, for example), state
+explicitly that the bucket is protected by the provider's own lock or that you accept that these keys can
+delete backups; retention respects that decision. If the provider answers "access denied", grant
+`s3:GetBucketVersioning` rather than working around it.
+
+Endpoints must use `https://`. A plain `http://` endpoint is accepted only for a private endpoint on the same
+machine or private network, and the address actually contacted is checked again when connecting.
 
 ## Database access
 
