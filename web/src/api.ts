@@ -120,7 +120,7 @@ export type Limits = {
   lock_timeout_ms: number;
   connection_limit: number;
 };
-export type ProjectLimits = Limits & { revision: number; applied_revision: number };
+export type ProjectLimits = Limits & { revision: number; applied_revision: number; last_error?: string };
 export type RoleUse = { role: string; project?: string; limit: number; connections: number; warning: boolean };
 export type ConnectionBudget = {
   max_connections: number;

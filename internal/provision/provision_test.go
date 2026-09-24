@@ -34,11 +34,19 @@ func (f *fakeRoles) EnsureRole(ctx context.Context, name, password string, limit
 	defer f.mu.Unlock()
 	f.passwords[name] = password
 	if _, ok := f.states[name]; !ok {
-		f.states[name] = postgres.RoleState{Settings: map[string]string{}, ConnectionLimit: limit}
+		f.states[name] = postgres.RoleState{Settings: map[string]string{}, ConnectionLimit: limit, DatabaseSettings: map[string]string{}}
 	}
 	return nil
 }
 func (f *fakeRoles) EnsureDatabase(ctx context.Context, name, owner string) error { return nil }
+func (f *fakeRoles) ResetDatabaseLimits(ctx context.Context, role, database string, keys []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, key := range keys {
+		delete(f.states[role].DatabaseSettings, key)
+	}
+	return nil
+}
 func (f *fakeRoles) ApplyLimits(ctx context.Context, role string, settings map[string]string, limit int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -60,7 +68,11 @@ func (f *fakeRoles) RoleStates(ctx context.Context) (map[string]postgres.RoleSta
 		for a, b := range v.Settings {
 			copied[a] = b
 		}
-		out[k] = postgres.RoleState{Settings: copied, ConnectionLimit: v.ConnectionLimit}
+		database := map[string]string{}
+		for a, b := range v.DatabaseSettings {
+			database[a] = b
+		}
+		out[k] = postgres.RoleState{Settings: copied, ConnectionLimit: v.ConnectionLimit, DatabaseSettings: database}
 	}
 	return out, nil
 }
@@ -140,6 +152,16 @@ func TestReadyProjectsServeWithGuardrailsAndDriftIsRepaired(t *testing.T) {
 	}
 	if state.Settings["default_transaction_read_only"] != "on" {
 		t.Fatal("repairing limits undid the write freeze")
+	}
+	// A per-database override would win over the role-wide guardrail.
+	roles.states[project.RoleName].DatabaseSettings["lock_timeout"] = "0"
+	roles.states[project.RoleName].DatabaseSettings["search_path"] = "app"
+	p.SyncLimits(ctx)
+	if _, set := roles.states[project.RoleName].DatabaseSettings["lock_timeout"]; set {
+		t.Fatal("a per-database override of a limit survived")
+	}
+	if roles.states[project.RoleName].DatabaseSettings["search_path"] != "app" {
+		t.Fatal("an unrelated per-database setting was removed")
 	}
 	applied := roles.applies
 	p.SyncLimits(ctx)

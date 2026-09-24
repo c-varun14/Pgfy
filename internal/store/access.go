@@ -93,15 +93,16 @@ func (l Limits) Validate() error {
 
 type ProjectLimits struct {
 	Limits
-	Revision        int64 `json:"revision"`
-	AppliedRevision int64 `json:"applied_revision"`
+	Revision        int64  `json:"revision"`
+	AppliedRevision int64  `json:"applied_revision"`
+	LastError       string `json:"last_error"`
 }
 
-const limitCols = "statement_timeout_ms,idle_in_transaction_ms,temp_file_limit_kb,lock_timeout_ms,connection_limit,revision,applied_revision"
+const limitCols = "statement_timeout_ms,idle_in_transaction_ms,temp_file_limit_kb,lock_timeout_ms,connection_limit,revision,applied_revision,last_error"
 
 func scanLimits(row interface{ Scan(...any) error }, extra ...any) (ProjectLimits, error) {
 	var l ProjectLimits
-	e := row.Scan(append([]any{&l.StatementTimeoutMS, &l.IdleInTransactionMS, &l.TempFileLimitKB, &l.LockTimeoutMS, &l.ConnectionLimit, &l.Revision, &l.AppliedRevision}, extra...)...)
+	e := row.Scan(append([]any{&l.StatementTimeoutMS, &l.IdleInTransactionMS, &l.TempFileLimitKB, &l.LockTimeoutMS, &l.ConnectionLimit, &l.Revision, &l.AppliedRevision, &l.LastError}, extra...)...)
 	return l, e
 }
 
@@ -136,13 +137,14 @@ func (s *Store) SetProjectLimits(ctx context.Context, projectID string, l Limits
 type RoleLimits struct {
 	ProjectID string
 	Role      string
+	Database  string
 	ProjectLimits
 }
 
 // ReadyProjectLimits lists every ready project's desired limits, applied or not:
 // drift on the PostgreSQL side is detected by comparing, not by revision alone.
 func (s *Store) ReadyProjectLimits(ctx context.Context) ([]RoleLimits, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT "+limitCols+", p.id, p.role_name FROM project_limits l JOIN projects p ON p.id=l.project_id WHERE p.stage='ready' ORDER BY p.created_at")
+	rows, e := s.DB.QueryContext(ctx, "SELECT "+limitCols+", p.id, p.role_name, p.db_name FROM project_limits l JOIN projects p ON p.id=l.project_id WHERE p.stage='ready' ORDER BY p.created_at")
 	if e != nil {
 		return nil, e
 	}
@@ -150,7 +152,7 @@ func (s *Store) ReadyProjectLimits(ctx context.Context) ([]RoleLimits, error) {
 	out := []RoleLimits{}
 	for rows.Next() {
 		var r RoleLimits
-		if r.ProjectLimits, e = scanLimits(rows, &r.ProjectID, &r.Role); e != nil {
+		if r.ProjectLimits, e = scanLimits(rows, &r.ProjectID, &r.Role, &r.Database); e != nil {
 			return nil, e
 		}
 		out = append(out, r)
@@ -159,7 +161,14 @@ func (s *Store) ReadyProjectLimits(ctx context.Context) ([]RoleLimits, error) {
 }
 
 func (s *Store) MarkLimitsApplied(ctx context.Context, projectID string, revision int64) error {
-	_, e := s.DB.ExecContext(ctx, "UPDATE project_limits SET applied_revision=? WHERE project_id=? AND revision=? AND applied_revision<?", revision, projectID, revision, revision)
+	_, e := s.DB.ExecContext(ctx, "UPDATE project_limits SET applied_revision=?, last_error='' WHERE project_id=? AND revision=?", revision, projectID, revision)
+	return e
+}
+
+// LimitsFailed records why PostgreSQL did not take the limits, so the
+// dashboard can say so instead of showing "applying" forever.
+func (s *Store) LimitsFailed(ctx context.Context, projectID, reason string) error {
+	_, e := s.DB.ExecContext(ctx, "UPDATE project_limits SET last_error=? WHERE project_id=?", reason, projectID)
 	return e
 }
 

@@ -216,8 +216,12 @@ func (s *Server) projectCredentials(r *http.Request, p store.Project) (connectio
 	if e != nil {
 		return connectionDetails{}, e
 	}
+	return s.connectionDetails(p, string(password)), nil
+}
+
+func (s *Server) connectionDetails(p store.Project, password string) connectionDetails {
 	access := s.databaseAccess()
-	c := connectionDetails{Host: access.Host, Port: access.Port, Database: p.DBName, User: p.RoleName, Password: string(password), SSLMode: "verify-full"}
+	c := connectionDetails{Host: access.Host, Port: access.Port, Database: p.DBName, User: p.RoleName, Password: password, SSLMode: "verify-full"}
 	if access.Mode == "tunnel" {
 		// The SSH tunnel already encrypts the hop; PostgreSQL TLS cannot be verified
 		// against a loopback hostname and some drivers refuse the placeholder cert.
@@ -225,7 +229,7 @@ func (s *Server) projectCredentials(r *http.Request, p store.Project) (connectio
 	}
 	c.URL = fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s", url.PathEscape(c.User), url.PathEscape(c.Password), c.Host, c.Port, c.Database, c.SSLMode)
 	c.Psql = fmt.Sprintf("psql %q", c.libpqURL())
-	return c, nil
+	return c
 }
 
 // libpqURL adds sslrootcert=system for libpq-based clients (psql, psycopg, Ruby),

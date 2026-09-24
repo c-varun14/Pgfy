@@ -165,6 +165,35 @@ func (m *Management) ApplyLimits(ctx context.Context, role string, settings map[
 	return tx.Commit(ctx)
 }
 
+func settingsMap(config []string) map[string]string {
+	out := map[string]string{}
+	for _, item := range config {
+		if key, value, ok := strings.Cut(item, "="); ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+// ResetDatabaseLimits removes per-database overrides of the limit keys, which
+// would otherwise win over the role-wide guardrails.
+func (m *Management) ResetDatabaseLimits(ctx context.Context, role, database string, keys []string) error {
+	if !ValidName(role) || !ValidName(database) {
+		return errors.New("invalid role identity")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for _, key := range keys {
+		if _, ok := LimitSettings(0, 0, -1, 0)[key]; !ok {
+			return errors.New("invalid setting")
+		}
+		if _, e := m.Pool.Exec(ctx, fmt.Sprintf("ALTER ROLE %s IN DATABASE %s RESET %s", pgx.Identifier{role}.Sanitize(), pgx.Identifier{database}.Sanitize(), key)); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
 var settingValue = regexp.MustCompile(`^(-1|[0-9]{1,10}(ms|kB))$`)
 
 // RoleLimits reports what PostgreSQL currently holds for each project role:
@@ -172,13 +201,20 @@ var settingValue = regexp.MustCompile(`^(-1|[0-9]{1,10}(ms|kB))$`)
 type RoleState struct {
 	Settings        map[string]string
 	ConnectionLimit int64
+	// DatabaseSettings are set with ALTER ROLE … IN DATABASE for the role's
+	// own database; they take precedence over the role-wide ones.
+	DatabaseSettings map[string]string
 }
 
 func (m *Management) RoleStates(ctx context.Context) (map[string]RoleState, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, e := m.Pool.Query(ctx, `SELECT r.rolname, r.rolconnlimit, COALESCE(s.setconfig, '{}')
-		FROM pg_roles r LEFT JOIN pg_db_role_setting s ON s.setrole=r.oid AND s.setdatabase=0
+	// Project databases share their role's name, so the role's own database is d.datname = r.rolname.
+	rows, e := m.Pool.Query(ctx, `SELECT r.rolname, r.rolconnlimit, COALESCE(s.setconfig, '{}'), COALESCE(ds.setconfig, '{}')
+		FROM pg_roles r
+		LEFT JOIN pg_db_role_setting s ON s.setrole=r.oid AND s.setdatabase=0
+		LEFT JOIN pg_database d ON d.datname=r.rolname
+		LEFT JOIN pg_db_role_setting ds ON ds.setrole=r.oid AND ds.setdatabase=d.oid
 		WHERE r.rolname ~ '^app_[a-f0-9]{12}$'`)
 	if e != nil {
 		return nil, e
@@ -188,16 +224,11 @@ func (m *Management) RoleStates(ctx context.Context) (map[string]RoleState, erro
 	for rows.Next() {
 		var name string
 		var limit int64
-		var config []string
-		if e := rows.Scan(&name, &limit, &config); e != nil {
+		var config, databaseConfig []string
+		if e := rows.Scan(&name, &limit, &config, &databaseConfig); e != nil {
 			return nil, e
 		}
-		state := RoleState{Settings: map[string]string{}, ConnectionLimit: limit}
-		for _, item := range config {
-			if key, value, ok := strings.Cut(item, "="); ok {
-				state.Settings[key] = value
-			}
-		}
+		state := RoleState{Settings: settingsMap(config), ConnectionLimit: limit, DatabaseSettings: settingsMap(databaseConfig)}
 		out[name] = state
 	}
 	return out, rows.Err()
@@ -250,7 +281,9 @@ func (m *Management) ConnectionBudget(ctx context.Context) (Budget, error) {
 		if ValidName(u.Role) {
 			b.Roles = append(b.Roles, u)
 			b.ProjectsUsed += u.Connections
-			b.ProjectsLimit += u.Limit
+			if u.Limit > 0 {
+				b.ProjectsLimit += u.Limit
+			}
 		} else {
 			b.System = append(b.System, u)
 		}

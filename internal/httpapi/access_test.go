@@ -5,7 +5,30 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/c-varun14/Pgfy/internal/postgres"
+	"github.com/c-varun14/Pgfy/internal/provision"
 )
+
+// noRoles stands in for PostgreSQL: it knows no roles, so limits are recorded
+// but never reported as applied.
+type noRoles struct{}
+
+func (noRoles) EnsureRole(context.Context, string, string, int64) error { return nil }
+func (noRoles) EnsureDatabase(context.Context, string, string) error    { return nil }
+func (noRoles) ApplyLimits(context.Context, string, map[string]string, int64) error {
+	return nil
+}
+func (noRoles) RoleStates(context.Context) (map[string]postgres.RoleState, error) {
+	return map[string]postgres.RoleState{}, nil
+}
+func (noRoles) ResetDatabaseLimits(context.Context, string, string, []string) error { return nil }
+func (noRoles) SetPassword(context.Context, string, string) error                   { return nil }
+func (noRoles) TerminateSessions(context.Context, string, string) error             { return nil }
+
+func (f *fixture) withProvisioner(t *testing.T) {
+	f.s.Provisioner = provision.New(f.s.Store, f.s.Vault, noRoles{}, nil)
+}
 
 func TestProjectListShowsWhichDatabasesAreOpenToTheInternet(t *testing.T) {
 	f := newFixture(t)
@@ -32,8 +55,19 @@ func TestProjectListShowsWhichDatabasesAreOpenToTheInternet(t *testing.T) {
 	}
 }
 
+func TestLimitsNeedPostgreSQLManagement(t *testing.T) {
+	f := newFixture(t)
+	cookie, csrf := f.setup(t)
+	p := f.readyProject(t, "000000000005", "Shop", 0)
+	ok := `{"statement_timeout_ms":30000,"idle_in_transaction_ms":0,"temp_file_limit_kb":-1,"lock_timeout_ms":5000,"connection_limit":10,"revision":1}`
+	if r := f.request("PUT", "/api/v1/projects/"+p.ID+"/limits", ok, cookie, csrf, f.s.Config.Origin); r.Code != 503 {
+		t.Fatal("limits accepted with nothing to apply them", r.Code)
+	}
+}
+
 func TestLimitsAreValidatedVersionedAndAudited(t *testing.T) {
 	f := newFixture(t)
+	f.withProvisioner(t)
 	cookie, csrf := f.setup(t)
 	origin := f.s.Config.Origin
 	p := f.readyProject(t, "000000000003", "Shop", 0)
