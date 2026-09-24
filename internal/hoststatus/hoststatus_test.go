@@ -69,6 +69,16 @@ func TestCertificateExpiryComesFromTheServedCertificate(t *testing.T) {
 	if Read(p, "https", now).Certificate.Expiring {
 		t.Fatal("a certificate with 60 days left is not expiring")
 	}
+	writeCert(t, p.Certificate, now.Add(-time.Hour))
+	if c := Read(p, "https", now).Certificate; !c.Expired || !c.Expiring {
+		t.Fatal("an expired certificate", c)
+	}
+	os.WriteFile(p.TLSState, []byte(`{"state":"placeholder"}`), 0644)
+	writeCert(t, p.Certificate, now.Add(3650*24*time.Hour))
+	if c := Read(p, "https", now).Certificate; c.ExpiresAt != nil {
+		t.Fatal("the placeholder's expiry is not a real one", c)
+	}
+	os.WriteFile(p.TLSState, []byte(`{"state":"trusted"}`), 0644)
 	os.WriteFile(p.Certificate, []byte("garbage"), 0644)
 	if c := Read(p, "https", now).Certificate; c.ExpiresAt != nil || c.Expiring {
 		t.Fatal("an unreadable certificate has no expiry", c)

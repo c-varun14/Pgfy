@@ -492,6 +492,25 @@ class HostStatusTests(unittest.TestCase):
                 write.assert_not_called()
                 apt.assert_not_called()
 
+    def test_unset_unattended_upgrades_are_installed_and_enabled_once(self):
+        def fake(printed, installed):
+            def run(args, **kwargs):
+                if args[0] == "apt-config":
+                    return SimpleNamespace(returncode=0, stdout=printed)
+                return SimpleNamespace(returncode=0, stdout="install ok installed" if installed else "")
+            return run
+        exists = Path.exists
+        for installed, config_present in ((False, False), (True, True)):
+            with patch.object(installer, "run", fake("", installed)), patch.object(installer, "atomic") as write, \
+                    patch.object(installer.subprocess, "run") as apt, \
+                    patch.object(installer.Path, "exists", lambda self: config_present if str(self).endswith("20auto-upgrades") else exists(self)):
+                self.assertEqual(installer.unattended_upgrades(), "enabled")
+            self.assertEqual([c.args[0][-1] for c in apt.call_args_list], [] if installed else ["update", "unattended-upgrades"])
+            self.assertEqual(write.called, not config_present)
+        for odd in ("UU=''\n", "UU='unbalanced\n"):
+            with patch.object(installer, "run", fake(odd, True)), patch.object(installer, "atomic"), patch.object(installer.subprocess, "run"):
+                self.assertIn(installer.unattended_upgrades(), ("enabled", "unknown"))
+
     def test_timers_follow_the_access_mode(self):
         written = {}
         with patch.object(installer, "atomic", lambda path, data, mode=0o600, uid=None, gid=None: written.__setitem__(path, data)), patch.object(installer, "run") as run:
@@ -500,3 +519,6 @@ class HostStatusTests(unittest.TestCase):
         commands = [c.args[0] for c in run.call_args_list]
         self.assertIn(["systemctl", "enable", "--now", "pgfy-host-status.timer"], commands)
         self.assertIn(["systemctl", "disable", "--now", "pgfy-cert.timer"], commands)
+        with patch.object(installer, "atomic"), patch.object(installer, "run") as run:
+            installer.converge_host(self.root, "https")
+        self.assertIn(["systemctl", "enable", "--now", "pgfy-cert.timer"], [c.args[0] for c in run.call_args_list])

@@ -30,8 +30,8 @@ type Paths struct {
 type Disk struct {
 	Name        string  `json:"name"`
 	Device      uint64  `json:"device,omitempty"`
-	TotalBytes  int64   `json:"total_bytes,omitempty"`
-	FreeBytes   int64   `json:"free_bytes,omitempty"`
+	TotalBytes  int64   `json:"total_bytes"`
+	FreeBytes   int64   `json:"free_bytes"`
 	FreePercent float64 `json:"free_percent"`
 	Low         bool    `json:"low"`
 	Error       string  `json:"error,omitempty"`
@@ -49,6 +49,7 @@ type Certificate struct {
 	Issuer    string    `json:"issuer,omitempty"`
 	ExpiresAt *int64    `json:"expires_at"`
 	Expiring  bool      `json:"expiring"`
+	Expired   bool      `json:"expired"`
 	LastSync  *CertSync `json:"last_sync,omitempty"`
 }
 
@@ -103,13 +104,15 @@ func certificate(p Paths, mode string, now time.Time) Certificate {
 	if b, e := os.ReadFile(p.TLSState); e == nil && json.Unmarshal(b, &state) == nil && state.State != "" {
 		c.State, c.Issuer = state.State, state.Issuer
 	}
-	// The served certificate is the truth about expiry, whatever the state file says.
-	if b, e := os.ReadFile(p.Certificate); e == nil {
+	// The served certificate is the truth about expiry, whatever the state file
+	// says; the self-signed placeholder's ten years are not an expiry to report.
+	if b, e := os.ReadFile(p.Certificate); e == nil && c.State == "trusted" {
 		if block, _ := pem.Decode(b); block != nil {
 			if cert, e := x509.ParseCertificate(block.Bytes); e == nil {
 				at := cert.NotAfter.Unix()
 				c.ExpiresAt = &at
 				c.Expiring = cert.NotAfter.Sub(now) < ExpiringWithin
+				c.Expired = !now.Before(cert.NotAfter)
 			}
 		}
 	}

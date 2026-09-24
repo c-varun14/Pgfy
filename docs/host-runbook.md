@@ -72,16 +72,20 @@ Pgfy cannot delete a database yet. To stop a client using one while keeping its 
 1. On its page, **Freeze writes**, then **Back up now** and confirm the backup completed.
 2. Stop the role logging in and end its sessions, as the bootstrap role:
    ```sh
-   cd /opt/firstcommit   # your installation directory
+   cd /opt/firstcommit   # or the directory you passed to the installer with --dir
    sudo ./pgfyctl diagnostics   # confirm the installation is healthy first
-   sudo docker compose --project-name "$(sudo python3 -c 'import json;print(json.load(open("state.json"))["volume_prefix"])')" \
-     --env-file compose.env -f "releases/$(sudo python3 -c 'import json;print(json.load(open("state.json"))["release"])')/compose.yaml" \
-     exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/bootstrap_password)" psql -U pgfy_bootstrap -d pgfy_system' <<'SQL'
+   prefix=$(sudo python3 -c 'import json;print(json.load(open("state.json"))["volume_prefix"])')
+   release=$(sudo python3 -c 'import json;print(json.load(open("state.json"))["release"])')
+   mode=$(sudo python3 -c 'import json;print(json.load(open("config/install.json"))["mode"])')
+   sudo docker compose --project-name "$prefix" --env-file compose.env \
+     -f "releases/$release/compose.yaml" -f "releases/$release/compose.$mode.yaml" \
+     exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/bootstrap_password)" psql -X -v ON_ERROR_STOP=1 -U pgfy_bootstrap -d pgfy_system' <<'SQL'
    ALTER ROLE app_xxxxxxxxxxxx NOLOGIN;
    SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'app_xxxxxxxxxxxx';
    SQL
    ```
-   Do not revoke `CONNECT` or drop anything: backups run as the management role through the database's owner role and
+   Replace `app_xxxxxxxxxxxx` with the database's user from its Connect tab. The dashboard does not know about this
+   change: it still lists the database as ready. Do not revoke `CONNECT` or drop anything: backups run as the management role through the database's owner role and
    would start failing.
 3. Backups of the retired database keep running and keep being pruned by retention, which is intended while its data is
    kept. Its connection check in the dashboard now fails.
