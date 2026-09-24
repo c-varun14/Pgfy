@@ -60,14 +60,27 @@ func (s *Server) provisioningReady(w http.ResponseWriter) bool {
 
 type projectView struct {
 	store.Project
-	SizeBytes   *int64                `json:"size_bytes"`
-	SizeError   string                `json:"size_error,omitempty"`
+	OpenToInternet  bool                 `json:"open_to_internet"`
+	RotationPending bool                 `json:"rotation_pending"`
+	Limits          *store.ProjectLimits `json:"limits,omitempty"`
+	SizeBytes       *int64               `json:"size_bytes"`
+	SizeError       string               `json:"size_error,omitempty"`
 	Policy      *store.PolicyState    `json:"policy,omitempty"`
 	Connections []postgres.Connection `json:"connections_now,omitempty"`
 }
 
 func (s *Server) projectSummary(r *http.Request, p store.Project) projectView {
 	view := projectView{Project: p}
+	if p.Stage == "ready" {
+		if st, e := s.Store.PolicyState(r.Context(), p.ID); e == nil {
+			var addresses []string
+			_ = json.Unmarshal(st.Addresses, &addresses)
+			view.OpenToInternet = openToInternet(addresses)
+		}
+	}
+	if pending, e := s.Store.PendingPassword(r.Context(), p.ID); e == nil {
+		view.RotationPending = pending != ""
+	}
 	if p.Stage == "ready" && s.Mgmt != nil {
 		if size, e := s.Mgmt.DatabaseSize(r.Context(), p.DBName); e == nil {
 			view.SizeBytes = &size
@@ -156,6 +169,9 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 	if st, e := s.Store.PolicyState(r.Context(), p.ID); e == nil {
 		view.Policy = &st
 	}
+	if limits, e := s.Store.ProjectLimits(r.Context(), p.ID); e == nil {
+		view.Limits = &limits
+	}
 	if p.Stage == "ready" && s.Mgmt != nil {
 		if connections, e := s.Mgmt.Connections(r.Context(), p.DBName, p.RoleName); e == nil {
 			view.Connections = connections
@@ -240,7 +256,13 @@ func (s *Server) getCredentials(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metadata_unavailable", "Stored credentials could not be read.")
 		return
 	}
-	write(w, 200, c)
+	// During an unfinished rotation this is still the active password; it may
+	// stop working once the provisioner finishes the change.
+	pending, _ := s.Store.PendingPassword(r.Context(), p.ID)
+	write(w, 200, struct {
+		connectionDetails
+		RotationPending bool `json:"rotation_pending"`
+	}{c, pending != ""})
 }
 
 func (s *Server) updateAccess(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +294,7 @@ func (s *Server) updateAccess(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metadata_unavailable", "Access rules could not be saved.")
 		return
 	}
+	s.audit(w, r, "access.update", p.ID, map[string]int{"addresses": len(normalized)})
 	if p.Stage == "ready" {
 		_ = s.Provisioner.SyncPolicy(r.Context())
 	}
@@ -322,9 +345,12 @@ func (s *Server) updateWrites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.FrozenAt = at.Unix()
+	action := "writes.freeze"
 	if at.IsZero() {
 		p.FrozenAt = 0
+		action = "writes.resume"
 	}
+	s.audit(w, r, action, p.ID, nil)
 	write(w, 200, s.projectSummary(r, p))
 }
 

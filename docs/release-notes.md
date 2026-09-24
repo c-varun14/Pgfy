@@ -1,5 +1,18 @@
 # Release notes
 
+## Unreleased — access and capacity (`mvp-to-production`)
+
+- Databases whose policy admits any address show "Open to the internet" on their card and page. The default is
+  unchanged.
+- Connection budget: ten reserved slots keep the dashboard and health checks from being locked out; Settings shows use
+  against what PostgreSQL accepts, per-database limits, and warns at 80%.
+- Per-database guardrails (statement 60 s, idle in transaction 5 min, lock wait 10 s, temporary files 1 GB,
+  25 connections), editable per database and re-applied if changed on the role.
+- Password rotation: sessions of the old password end before the new one becomes active; an unconfirmed change is
+  finished automatically and never loses the new password.
+- An append-only audit table records rotations, access, freeze, limits and settings changes.
+- Updating installs the new PostgreSQL grants through the release's converge step.
+
 ## Unreleased — updater (`mvp-to-production`)
 
 - `pgfyctl update <bundle>` moves an installation to a newer release: verify, pause jobs and changes (`--drain` waits

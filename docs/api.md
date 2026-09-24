@@ -11,11 +11,14 @@ All application endpoints use JSON under `/api/v1`. Responses containing authent
 | `GET /api/v1/auth/session` | Session cookie | `{email, expires_at, csrf_token, client_ip}` |
 | `GET /api/v1/system/status` | Session cookie | `ready`, `maintenance`, SQLite/PostgreSQL states and versions, app/tool versions, backup state, `database_access` |
 | `GET /api/v1/settings` | Session cookie | Read-only installation identity, hostname/origin/mode, release and recorded host versions |
-| `GET /api/v1/projects` | Session cookie | `{projects: [...], database_access}`; each project carries stage, `failed`, `stage_error`, `size_bytes` (or `size_error`) |
+| `GET /api/v1/projects` | Session cookie | `{projects: [...], database_access}`; each project carries stage, `failed`, `stage_error`, `size_bytes` (or `size_error`), `open_to_internet` (its policy admits any address) and `rotation_pending` |
+| `GET /api/v1/system/connections` | Session cookie | `{max_connections, superuser_reserved, reserved, available, projects_used, projects_limit, other_used, warning, overcommitted, roles[], system[]}`; each role `{role, project, limit, connections, warning}`; `warning` at 80% of `available` or of a role's limit; 503 when PostgreSQL cannot be read |
 | `POST /api/v1/projects` | `{name, idempotency_key?}` + CSRF | 202 with the new project (200 when the key repeats); provisioning continues in the background |
-| `GET /api/v1/projects/{id}` | Session cookie | `{project, database_access}`; the project includes `policy` and `connections_now` (live sessions of its role) |
+| `GET /api/v1/projects/{id}` | Session cookie | `{project, database_access}`; the project includes `policy`, `limits` (with `revision` and `applied_revision`) and `connections_now` (live sessions of its role) |
+| `PUT /api/v1/projects/{id}/limits` | `{statement_timeout_ms, idle_in_transaction_ms, temp_file_limit_kb, lock_timeout_ms, connection_limit, revision}` + CSRF | Timeouts 0 (off) or 1 s–24 h; temporary files −1 (unlimited) or 1 MB–1 TB, never 0; connections 1–100. 409 on a stale revision. Applied to the role at once for ready projects; returns the limits |
+| `POST /api/v1/projects/{id}/credentials/rotate` | `{}` + CSRF | 200 `{credentials, rotated_at}` once PostgreSQL enforces the new password and every session of the role has ended; 502 `rotation_incomplete` when PostgreSQL did not confirm it (the change is finished automatically); 409 before ready |
 | `POST /api/v1/projects/{id}/retry` | `{}` + CSRF | 204; resumes a failed project from its recorded stage |
-| `GET /api/v1/projects/{id}/credentials` | Session cookie | Host, port, database, user, password, `sslmode`, `url`, `psql`; 409 until ready; never logged |
+| `GET /api/v1/projects/{id}/credentials` | Session cookie | Host, port, database, user, password, `sslmode`, `url`, `psql`, `rotation_pending`; 409 until ready; never logged. While a rotation is pending this is still the active password, which may stop working once the change completes |
 | `PUT /api/v1/projects/{id}/access` | `{revision, addresses[]}` + CSRF | Replaces the allowlist under an optimistic revision (409 on conflict, 400 on invalid addresses) and applies it; returns the policy state |
 | `PUT /api/v1/projects/{id}/writes` | `{frozen}` + CSRF | Freezes or resumes application writes for a ready project (409 before ready); returns the project with `frozen_at` |
 | `POST /api/v1/projects/{id}/connection-checks` | `{}` + CSRF | 201 `{id, application_name, command, expires_at}` |
@@ -72,3 +75,7 @@ Restores always create a new project: download, SHA-256 verification, PostgreSQL
 There are no APIs for domain changes, cutover confirmation, Caddy administration, public account recovery, or signup after initial setup.
 
 While `pgfyctl update` holds the installation paused (`maintenance: true` in the status), every non-GET API request except setup, sign-in and sign-out returns `503` with code `maintenance`, no job starts, provisioning waits, and reconciliation reads the bucket without deleting anything.
+
+## Audit
+
+Administrative actions are recorded in an append-only `audit` table in SQLite (time, administrator, action, target, request ID and a short detail that never contains a secret): `credentials.rotate`, `access.update`, `writes.freeze`, `writes.resume`, `limits.update`, `settings.storage` and `settings.backups`. The rotation row commits in the same transaction as the new password; the others are written after their change commits. Updates and deletes are refused by the database. There is no audit view yet.

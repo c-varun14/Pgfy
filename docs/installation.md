@@ -210,6 +210,29 @@ ssh -N -L 5432:127.0.0.1:5432 user@server
 
 Loopback-forwarded connections are admitted per project without a public port; the SSH tunnel encrypts the hop, so the dashboard shows a `sslmode=disable` URL there.
 
+### Connections, limits and passwords
+
+PostgreSQL accepts 150 connections. Three are kept for maintenance and ten are reserved for the dashboard's management
+role and health checks (`reserved_connections`, with `pg_use_reserved_connections` granted to them), so project
+databases can never lock the dashboard out; the remaining 137 are shared by all databases. Settings → Connections shows
+what is in use, each database's limit and the sum of the limits, and warns at 80% of the total or of a database's own
+limit. Limits may add up to more than 137: that is fine while not every application is busy at once.
+
+Each database's user carries guardrails, set when it is created and editable on its Access tab: statement timeout 60 s,
+idle-in-transaction timeout 5 minutes, lock wait 10 s, temporary files 1 GB per session and 25 connections. The
+connection limit and the temporary-file limit are enforced; the three timeouts are defaults an application may override
+with `SET` for its own session (Pgfy restores them if the role's defaults are changed). Changes apply to new
+connections. Restores run under the management role and are not bound by these limits.
+
+"Change password" on the Connect tab issues a new password, sets it on the database user, closes every session of that
+user and only then makes it the password the dashboard shows; the new connection URL is displayed once in the dialog
+and remains available through "Reveal" afterwards. If PostgreSQL does not confirm the change, the dashboard keeps the
+old password active and finishes the change automatically in the background. Every rotation is recorded in the audit
+table.
+
+Existing installations receive the reserved-slot and parameter grants when updated with `pgfyctl update` (or on an
+installer rerun); new installations get them at initialization.
+
 If the DNS record for the hostname is proxied through a CDN (for example Cloudflare's orange cloud), PostgreSQL connections will not pass through it: use a DNS-only record for the database hostname.
 
 ## Network boundary

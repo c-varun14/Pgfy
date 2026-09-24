@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { ArrowRight, Database, Plus, TriangleAlert } from "lucide-react";
+import { ArrowRight, Database, Globe, Plus, TriangleAlert } from "lucide-react";
 import { api, type Discovery, type Project, type Status, type StorageSettings } from "../api";
 import { formatBytes, formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
@@ -62,7 +62,7 @@ export function DatabasesPage({ status, navigate }: { status: Status | null; nav
     {projects === null ? !error && <Skeleton lines={3} className="skeleton-cards" /> : projects.length === 0 ? <EmptyState icon={<EmptyArt />} title="No databases yet" action={<Button onClick={() => setCreating(true)}><Plus size={16} />New database</Button>}>Create your first database. It will be ready in a few seconds.</EmptyState> :
       <div className="project-grid" role="list" aria-label="Databases">
         {projects.map((project) => { const stage = databaseStage(project); const backup = latest.get(project.id); const connections = project.connections_now?.length || 0; return <button type="button" role="listitem" className="project-card" key={project.id} onClick={() => navigate(`/projects/${project.id}`)}>
-          <div className="project-card-top"><span className="section-icon"><Database size={20} /></span><Pill tone={stage.tone}>{stage.label}</Pill></div>
+          <div className="project-card-top"><span className="section-icon"><Database size={20} /></span><span className="pill-row">{project.open_to_internet && <OpenPill />}<Pill tone={stage.tone}>{stage.label}</Pill></span></div>
           <h2>{project.name}</h2>
           <p className="mono">{project.db_name}</p>
           <dl className="project-card-stats">
@@ -80,4 +80,9 @@ export function DatabasesPage({ status, navigate }: { status: Status | null; nav
       </form>
     </Dialog>
   </>;
+}
+
+/** Any address may connect: TLS and the password are the only protection. The default, but never silent. */
+export function OpenPill() {
+  return <span title="Any address can connect with TLS and this database's password. Restrict addresses on the Access tab."><Pill><Globe size={12} aria-hidden="true" />Open to the internet</Pill></span>;
 }

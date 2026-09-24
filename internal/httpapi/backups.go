@@ -76,6 +76,7 @@ func (s *Server) putStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Jobs.Kick()
+	s.audit(w, r, "settings.storage", in.Bucket, map[string]string{"endpoint": in.Endpoint, "prefix": in.Prefix})
 	write(w, 200, map[string]any{"configured": true, "settings": in.Masked()})
 }
 
@@ -267,6 +268,7 @@ func (s *Server) putBackupPolicy(w http.ResponseWriter, r *http.Request) {
 		failure(w, 400, "invalid_policy", e.Error())
 		return
 	}
+	s.audit(w, r, "settings.backups", "", in)
 	if s.Jobs != nil {
 		s.Jobs.Kick()
 	}
