@@ -448,6 +448,18 @@ def converge_steps(installation):
     atomic(installation.root / "config/pg/pg_hba.conf", pg_hba(installation.state["database_subnet"]), 0o644)
     installation.validate_caddy()
 
+# Grants added after the first release; init.sh carries them for fresh clusters. Additive and harmless to
+# earlier releases, as every converge step must be.
+POSTGRES_CONVERGE_SQL = """GRANT pg_use_reserved_connections TO pgfy_mgmt, pgfy_health;
+GRANT SET ON PARAMETER temp_file_limit TO pgfy_mgmt;
+"""
+
+def converge_postgres(installation):
+    """Bring an existing cluster's system roles up to this release, as the bootstrap role over the local socket."""
+    installation.wait_postgres()
+    command = 'PGPASSWORD="$(cat /run/secrets/bootstrap_password)" exec psql -U pgfy_bootstrap -d pgfy_system -XAtq -v ON_ERROR_STOP=1'
+    installation.compose("exec", "-T", "postgres", "sh", "-c", command, input=POSTGRES_CONVERGE_SQL, timeout=60)
+
 def install(args):
     bundle = Path(args.bundle).resolve()
     release = verify_bundle(bundle)
@@ -541,6 +553,7 @@ def install(args):
             raise InstallError("Existing management storage is missing. Restore SQLite; setup will not be reopened.")
         installation.compose("run", "--rm", "--no-deps", "application", "initialize-store")
     installation.compose("up", "-d", "postgres", "application", "caddy", timeout=180)
+    converge_postgres(installation)
     print("Checking authenticated PostgreSQL, SQLite, and dashboard routing…", flush=True)
     installation.verify()
     cfg["caddy_version"] = installation.compose("exec", "-T", "caddy", "caddy", "version").stdout.strip()
@@ -752,7 +765,14 @@ def converge(root, contract, lock_fd):
         raise InstallError(f"Unsupported converge contract {contract}.")
     if lock_fd is None or not holds_lock(root, lock_fd):
         raise InstallError("converge runs only from pgfyctl update, which holds the installation lock.")
-    converge_steps(Installation(root))
+    converge_installation(Installation(root))
+
+def converge_installation(installation):
+    """Everything this release changes on an installed host during an update."""
+    converge_steps(installation)
+    # PostgreSQL keeps running through an update; the later force-recreate applies new server flags.
+    installation.compose("up", "-d", "--no-recreate", "postgres", timeout=180)
+    converge_postgres(installation)
 
 def update(root, bundle, drain=False, lock_fd=None):
     installation = Installation(root)

@@ -66,6 +66,11 @@ func (s *Store) CreateProject(ctx context.Context, p Project, idempotencyKey, se
 	if _, e = tx.ExecContext(ctx, "INSERT INTO policy_state(project_id) VALUES (?)", p.ID); e != nil {
 		return Project{}, false, e
 	}
+	d := DefaultLimits
+	if _, e = tx.ExecContext(ctx, "INSERT INTO project_limits(project_id,statement_timeout_ms,idle_in_transaction_ms,temp_file_limit_kb,lock_timeout_ms,connection_limit,updated_at) VALUES (?,?,?,?,?,?,?)",
+		p.ID, d.StatementTimeoutMS, d.IdleInTransactionMS, d.TempFileLimitKB, d.LockTimeoutMS, d.ConnectionLimit, now.Unix()); e != nil {
+		return Project{}, false, e
+	}
 	if e = tx.Commit(); e != nil {
 		return Project{}, false, e
 	}

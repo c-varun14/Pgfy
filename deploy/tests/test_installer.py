@@ -380,3 +380,26 @@ class UpdateTests(unittest.TestCase):
             installer.converge(self.root, installer.CONVERGE_CONTRACT, None)
         with tempfile.TemporaryFile() as other, self.assertRaisesRegex(installer.InstallError, "holds the installation lock"):
             installer.converge(self.root, installer.CONVERGE_CONTRACT, other.fileno())
+
+class ConvergeTests(unittest.TestCase):
+    def test_update_converge_grants_without_recreating_postgres(self):
+        installation = SimpleNamespace(root=Path("/nonexistent"), state=TEST_STATE)
+        calls = []
+        installation.compose = lambda *args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(returncode=0, stdout="")
+        installation.wait_postgres = lambda: calls.append((("wait",), {}))
+        with patch.object(installer, "converge_steps") as steps:
+            installer.converge_installation(installation)
+        steps.assert_called_once()
+        up = [args for args, _ in calls if "up" in args]
+        self.assertEqual(up, [("up", "-d", "--no-recreate", "postgres")])
+        sql = [kwargs.get("input", "") for args, kwargs in calls if "exec" in args]
+        self.assertEqual(len(sql), 1)
+        self.assertIn("GRANT pg_use_reserved_connections TO pgfy_mgmt, pgfy_health", sql[0])
+        self.assertIn("GRANT SET ON PARAMETER temp_file_limit TO pgfy_mgmt", sql[0])
+        self.assertIn("pgfy_bootstrap", " ".join(a for args, _ in calls if "exec" in args for a in args))
+        self.assertLess([a[0] for a, _ in calls].index("wait"), [i for i, (a, _) in enumerate(calls) if "exec" in a][0])
+
+    def test_fresh_clusters_get_the_same_grants(self):
+        init = (Path(__file__).parents[1] / "postgres/init.sh").read_text()
+        for line in installer.POSTGRES_CONVERGE_SQL.strip().splitlines():
+            self.assertIn(line, init)

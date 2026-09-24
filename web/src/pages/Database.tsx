@@ -12,7 +12,7 @@ import { Skeleton } from "../components/ui/skeleton";
 import { Tabs } from "../components/ui/tabs";
 import { Tooltip } from "../components/ui/tooltip";
 import { useToast } from "../components/ui/toast";
-import { databaseStage } from "./Databases";
+import { databaseStage, OpenPill } from "./Databases";
 import { AccessTab } from "./database/AccessTab";
 import { BackupsTab } from "./database/BackupsTab";
 import { ConnectTab } from "./database/ConnectTab";
@@ -38,7 +38,7 @@ export function DatabasePage({ id, session, tab, navigate }: { id: string; sessi
   const stage = databaseStage(project); const ready = project.stage === "ready" && !project.failed; const frozen = ready && project.frozen_at > 0; const connections = project.connections_now?.length || 0; const sslmode = access.mode === "tunnel" ? "disable" : access.certificate.state === "trusted" ? "verify-full" : "require";
   const actions = ready ? <><Button onClick={() => void copyUrl()} loading={credentialBusy}><Copy size={15} />Copy connection URL</Button><Tooltip text={storage === false ? "Set up backup storage first" : "Create a backup now"}><Button variant="secondary" onClick={() => void backupNow()} loading={backupBusy} disabled={storage !== true}><Archive size={15} />Back up now</Button></Tooltip>{frozen ? <Button variant="secondary" onClick={() => void setWrites(false)} loading={writesBusy}><Play size={15} />Resume writes</Button> : <Tooltip text="Reject writes while keeping reads, e.g. before moving this database"><Button variant="secondary" onClick={() => setFreezing(true)} loading={writesBusy}><Snowflake size={15} />Freeze writes</Button></Tooltip>}</> : undefined;
   return <>
-    <PageHeader eyebrow={<div className="breadcrumb"><button type="button" onClick={() => navigate("/")}>Databases</button><span>/</span><span>{project.name}</span></div>} title={project.name} status={<Pill tone={stage.tone}>{stage.label}</Pill>} description={`${ready ? formatBytes(project.size_bytes) : "Setting up"} · created ${relativeTime(project.created_at)} · ${connections ? `${connections} live connection${connections === 1 ? "" : "s"}` : "no app connected"}`} actions={actions} />
+    <PageHeader eyebrow={<div className="breadcrumb"><button type="button" onClick={() => navigate("/")}>Databases</button><span>/</span><span>{project.name}</span></div>} title={project.name} status={<span className="pill-row"><Pill tone={stage.tone}>{stage.label}</Pill>{ready && project.open_to_internet && <OpenPill />}</span>} description={`${ready ? formatBytes(project.size_bytes) : "Setting up"} · created ${relativeTime(project.created_at)} · ${connections ? `${connections} live connection${connections === 1 ? "" : "s"}` : "no app connected"}`} actions={actions} />
     {error && <ErrorNotice message={error} />}
     {frozen && <Banner tone="warn">Writes have been frozen since {relativeTime(project.frozen_at)}: the app can still read, every INSERT, UPDATE or DELETE is rejected, and a backup taken now is complete. Resume writes when you are done.</Banner>}
     <Dialog open={freezing} onClose={() => setFreezing(false)} title="Freeze writes?">
@@ -47,7 +47,7 @@ export function DatabasePage({ id, session, tab, navigate }: { id: string; sessi
     </Dialog>
     {!ready ? <Provisioning project={project} onRetry={load} /> : <><Tabs value={activeTab} options={tabs} onChange={(next) => navigate(`/projects/${id}?tab=${next}`)} label="Database sections" /><div className="tab-panel page-enter" role="tabpanel" key={activeTab}>
       {activeTab === "overview" && <OverviewTab project={project} host={access.host} sslmode={sslmode} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} onTab={(next) => navigate(`/projects/${id}?tab=${next}`)} />}
-      {activeTab === "connect" && <ConnectTab project={project} access={access} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} />}
+      {activeTab === "connect" && <ConnectTab project={project} access={access} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} onRotated={(next) => { setCredentials(next); setRevealed(true); void load(); }} />}
       {activeTab === "backups" && <BackupsTab project={project} navigate={navigate} />}
       {activeTab === "access" && <AccessTab project={project} session={session} onChange={load} />}
     </div></>}

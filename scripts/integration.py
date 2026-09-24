@@ -83,7 +83,7 @@ def update_and_rollback(directory, installation, application_image, next_image, 
             raise host.InstallError("injected failure after the new release migrated")
     host.DIGEST = __import__("re").compile(r"[a-zA-Z0-9./:_-]+(@sha256:[a-f0-9]{64})?\Z")  # local images carry no registry digest
     host.pull_images = lambda images: None
-    host.run_converge = lambda installation, bundle, lock_fd: host.converge_steps(installation)
+    host.run_converge = lambda installation, bundle, lock_fd: host.converge_installation(installation)
     host.Installation.verify = verify_then_fail_once
     try:
         with patch_atomic_owner():
@@ -295,6 +295,53 @@ def main():
             finally:
                 probe.wait(timeout=60)
             passed("connection check observes the application's TLS session as evidence")
+            # --- Access and capacity: reserved slots, guardrails, limits, rotation ---
+            shop_role, blog = projects["Shop"]["credentials"]["user"], projects["Blog"]["id"]
+            assert sql("SHOW reserved_connections;") == "10"
+            assert sql("SELECT pg_has_role('pgfy_mgmt','pg_use_reserved_connections','MEMBER') AND pg_has_role('pgfy_health','pg_use_reserved_connections','MEMBER');") == "t"
+            def role_config(role):
+                return sql(f"SELECT array_to_string(s.setconfig, ',') FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='{role}' AND s.setdatabase=0;")
+            for expected in ("statement_timeout=60000ms", "idle_in_transaction_session_timeout=300000ms", "temp_file_limit=1048576kB", "lock_timeout=10000ms"):
+                assert expected in role_config(shop_role), role_config(shop_role)
+            assert psql(remote_url("Shop"), "SHOW statement_timeout;").stdout.strip() == "1min"
+            refused = psql(remote_url("Shop"), "SET temp_file_limit = -1;")
+            assert refused.returncode != 0 and "permission denied" in refused.stderr, refused.stderr
+            assert psql(remote_url("Shop"), f"ALTER ROLE {shop_role} CONNECTION LIMIT 100;").returncode != 0
+            limits = request(f"/api/v1/projects/{shop}")[1]["project"]["limits"]
+            change = {key: limits[key] for key in ("statement_timeout_ms", "idle_in_transaction_ms", "temp_file_limit_kb", "lock_timeout_ms", "connection_limit")}
+            code, updated = request(f"/api/v1/projects/{shop}/limits", dict(change, statement_timeout_ms=30000, connection_limit=30, revision=limits["revision"]), session["csrf_token"], "PUT")
+            assert code == 200 and updated["applied_revision"] == updated["revision"], (code, updated)
+            assert sql(f"SELECT rolconnlimit FROM pg_roles WHERE rolname='{shop_role}';") == "30"
+            assert psql(remote_url("Shop"), "SHOW statement_timeout;").stdout.strip() == "30s"
+            assert "default_transaction_read_only" not in role_config(shop_role), "limits must not disturb the write freeze setting"
+            code, budget = request("/api/v1/system/connections")
+            assert code == 200 and budget["reserved"] == 10 and budget["available"] == budget["max_connections"] - budget["superuser_reserved"] - 10, budget
+            assert any(r["project"] == "Shop" and r["limit"] == 30 for r in budget["roles"]) and {r["role"] for r in budget["system"]} == {"pgfy_mgmt", "pgfy_health"}, budget
+            passed("reserved slots for management and health; guardrails set, enforced where PostgreSQL allows, changeable per project; budget reported")
+            old_url = remote_url("Blog")
+            blog_role = projects["Blog"]["credentials"]["user"]
+            holder = subprocess.Popen(["docker", "run", "--rm", "--network", project + "_dbpublic", "--entrypoint", "psql", images["postgres"], old_url, "-c", "select pg_sleep(60)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(30):
+                    if sql(f"SELECT count(*) FROM pg_stat_activity WHERE usename='{blog_role}';") != "0":
+                        break
+                    time.sleep(1)
+                code, rotated = request(f"/api/v1/projects/{blog}/credentials/rotate", {}, session["csrf_token"])
+                assert code == 200 and rotated["credentials"]["password"] != projects["Blog"]["credentials"]["password"], (code, rotated)
+                assert holder.wait(timeout=30) != 0, "the session using the old password survived the rotation"
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+            assert psql(old_url, "SELECT 1;").returncode != 0, "the old password still works"
+            projects["Blog"]["credentials"] = rotated["credentials"]
+            assert psql(remote_url("Blog"), "SELECT x FROM t;").stdout.strip() == "1"
+            code, revealed = request(f"/api/v1/projects/{blog}/credentials")
+            assert code == 200 and revealed["password"] == rotated["credentials"]["password"] and not revealed["rotation_pending"]
+            listed = {p["id"]: p["open_to_internet"] for p in request("/api/v1/projects")[1]["projects"]}
+            for name in ("Shop", "Blog"):
+                addresses = request(f"/api/v1/projects/{projects[name]['id']}")[1]["project"]["policy"]["addresses"]
+                assert listed[projects[name]["id"]] == any(a in ("0.0.0.0/0", "::/0") for a in addresses), (name, addresses, listed)
+            passed("rotation ends sessions using the old password, which stops working; the new one is the one revealed")
             # --- Backups against a disposable S3-compatible store on the proxy network ---
             minio_secret = secrets.token_hex(16)
             minio_name = project.replace("_", "-") + "-minio"  # S3 clients need a valid hostname

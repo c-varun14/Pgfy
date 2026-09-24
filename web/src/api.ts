@@ -106,6 +106,34 @@ export type Project = {
   size_error?: string;
   policy?: PolicyState;
   connections_now?: Connection[];
+  /** The access policy admits any address: TLS and the password are the only protection. */
+  open_to_internet?: boolean;
+  /** A password change was recorded but not yet confirmed by PostgreSQL. */
+  rotation_pending?: boolean;
+  limits?: ProjectLimits;
+};
+export type Limits = {
+  statement_timeout_ms: number;
+  idle_in_transaction_ms: number;
+  /** -1 is unlimited. */
+  temp_file_limit_kb: number;
+  lock_timeout_ms: number;
+  connection_limit: number;
+};
+export type ProjectLimits = Limits & { revision: number; applied_revision: number };
+export type RoleUse = { role: string; project?: string; limit: number; connections: number; warning: boolean };
+export type ConnectionBudget = {
+  max_connections: number;
+  superuser_reserved: number;
+  reserved: number;
+  available: number;
+  projects_used: number;
+  projects_limit: number;
+  other_used: number;
+  warning: boolean;
+  overcommitted: boolean;
+  roles: RoleUse[];
+  system: RoleUse[];
 };
 export type Credentials = {
   host: string;
@@ -116,6 +144,7 @@ export type Credentials = {
   sslmode: string;
   url: string;
   psql: string;
+  rotation_pending?: boolean;
 };
 export type ConnectionCheck = {
   id: string;

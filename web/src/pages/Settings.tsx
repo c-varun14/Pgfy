@@ -1,6 +1,6 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, type BackupPolicy, type Settings, type Status } from "../api";
+import { api, type BackupPolicy, type ConnectionBudget, type RoleUse, type Settings, type Status } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { Banner } from "../components/ui/banner";
 import { Card, CardHeader } from "../components/ui/card";
@@ -42,6 +42,24 @@ function BackupsCard() {
   </Card>;
 }
 
+/** What PostgreSQL will accept from project users, what they use now, and the
+ *  slots held back so the dashboard and health checks are never locked out. */
+function ConnectionsCard() {
+  const [budget, setBudget] = useState<ConnectionBudget | null>(null); const [error, setError] = useState("");
+  useEffect(() => { const load = () => void api<ConnectionBudget>("/system/connections").then((next) => { setBudget(next); setError(""); }).catch((failure) => setError((failure as Error).message)); load(); const timer = setInterval(load, 15000); return () => clearInterval(timer); }, []);
+  const used = budget ? budget.projects_used + budget.other_used : 0; const share = budget && budget.available > 0 ? Math.min(100, Math.round((used / budget.available) * 100)) : 0;
+  const row = (u: RoleUse) => <tr key={u.role}><td>{u.project || u.role}</td><td className="mono">{u.connections} / {u.limit === -1 ? "∞" : u.limit}</td><td>{u.warning && <Pill tone="bad">Near limit</Pill>}</td></tr>;
+  return <Card><CardHeader title="Connections" aside={budget && <Pill tone={budget.warning ? "bad" : "good"}>{used} of {budget.available} in use</Pill>} />
+    {budget ? <>
+      <div className={`budget-meter${budget.warning ? " warn" : ""}`} role="meter" aria-valuemin={0} aria-valuemax={budget.available} aria-valuenow={used} aria-label="Connections in use"><span style={{ width: `${share}%` }} /></div>
+      {budget.warning && <Banner tone="warn">Connections are above 80% of what this server accepts. Lower per-database limits or close idle connections.</Banner>}
+      <p className="caption">PostgreSQL accepts {budget.max_connections} connections: {budget.reserved} are reserved for the dashboard and health checks and {budget.superuser_reserved} for maintenance, leaving {budget.available} for your databases. Their limits add up to {budget.projects_limit}{budget.overcommitted ? ", more than can be open at once — fine while they are not all busy" : ""}.</p>
+      <table className="plain-table"><thead><tr><th>Database</th><th>Open / limit</th><th /></tr></thead><tbody>{budget.roles.map(row)}{budget.system.map(row)}</tbody></table>
+    </> : !error && <p>Loading connection use…</p>}
+    {error && <ErrorNotice message={error} />}
+  </Card>;
+}
+
 function friendlyName(key: string) { return key === "application" ? "Pgfy" : key.replaceAll("_", " ").replace(/\b\w/g, (value) => value.toUpperCase()); }
 export function SettingsPage({ settings, status }: { settings: Settings; status: Status | null }) {
   const access = status?.database_access; const certificate = access?.certificate; const { theme, setTheme } = useTheme();
@@ -59,6 +77,7 @@ export function SettingsPage({ settings, status }: { settings: Settings; status:
         <p className="caption">{access.mode === "direct" ? "Allow TCP port 5432 in your provider firewall for the app servers that connect." : "Open an SSH tunnel before connecting to PostgreSQL."}</p></> : <p>Database access details are unavailable.</p>}
     </Card>
     <BackupsCard />
+    <ConnectionsCard />
     <Card><CardHeader title="Appearance" /><SegmentedControl value={theme} options={themeOptions} onChange={setTheme} label="Theme" /></Card>
     <details className="components-details"><summary>Components</summary><Card><DetailsList items={[
       { label: "Caddy", value: settings.caddy_version }, { label: "Docker", value: settings.docker_version }, { label: "Compose", value: settings.compose_version },

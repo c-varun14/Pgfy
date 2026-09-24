@@ -26,6 +26,10 @@ GRANT pg_read_all_stats TO pgfy_mgmt;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_reload_conf() TO pgfy_mgmt;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_hba_file_rules() TO pgfy_mgmt;
 GRANT SELECT ON pg_catalog.pg_hba_file_rules TO pgfy_mgmt;
+-- Management and health keep reserved connection slots when project roles fill the rest,
+-- and management may set temp_file_limit on project roles (a superuser-only parameter).
+GRANT pg_use_reserved_connections TO pgfy_mgmt, pgfy_health;
+GRANT SET ON PARAMETER temp_file_limit TO pgfy_mgmt;
 -- Project roles must never reach the maintenance databases.
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
 REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;

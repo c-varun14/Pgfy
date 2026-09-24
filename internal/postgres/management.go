@@ -80,7 +80,7 @@ func (m *Management) DatabaseSize(ctx context.Context, database string) (int64, 
 
 // EnsureRole creates the restricted project role or verifies that an existing
 // one already has the expected attributes, so retries after interruption are safe.
-func (m *Management) EnsureRole(ctx context.Context, name, password string) error {
+func (m *Management) EnsureRole(ctx context.Context, name, password string, connectionLimit int64) error {
 	if !ValidName(name) || !passwordPattern.MatchString(password) {
 		return errors.New("invalid role identity")
 	}
@@ -99,8 +99,168 @@ func (m *Management) EnsureRole(ctx context.Context, name, password string) erro
 	if !errors.Is(e, pgx.ErrNoRows) {
 		return e
 	}
-	_, e = m.Pool.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 25", pgx.Identifier{name}.Sanitize(), password))
+	if connectionLimit < 1 || connectionLimit > 100 {
+		return errors.New("invalid connection limit")
+	}
+	_, e = m.Pool.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT %d", pgx.Identifier{name}.Sanitize(), password, connectionLimit))
 	return e
+}
+
+// SetPassword replaces a project role's password. Existing sessions keep
+// running until they are terminated separately.
+func (m *Management) SetPassword(ctx context.Context, role, password string) error {
+	if !ValidName(role) || !passwordPattern.MatchString(password) {
+		return errors.New("invalid role identity")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, e := m.Pool.Exec(ctx, fmt.Sprintf("ALTER ROLE %s WITH PASSWORD '%s'", pgx.Identifier{role}.Sanitize(), password))
+	return e
+}
+
+// LimitSettings renders limits as the role settings PostgreSQL stores, so the
+// same strings serve for applying and for detecting drift. Values are
+// validated integers, never user text.
+func LimitSettings(statementMS, idleMS, tempKB, lockMS int64) map[string]string {
+	temp := "-1"
+	if tempKB != -1 {
+		temp = fmt.Sprintf("%dkB", tempKB)
+	}
+	return map[string]string{
+		"statement_timeout":                   fmt.Sprintf("%dms", statementMS),
+		"idle_in_transaction_session_timeout": fmt.Sprintf("%dms", idleMS),
+		"temp_file_limit":                     temp,
+		"lock_timeout":                        fmt.Sprintf("%dms", lockMS),
+	}
+}
+
+// ApplyLimits sets the role's guardrails and connection limit together.
+// temp_file_limit may only be set on a role by a holder of SET on that
+// parameter, which the installer grants to pgfy_mgmt. Only these keys are
+// touched: the write freeze lives in the same role settings.
+func (m *Management) ApplyLimits(ctx context.Context, role string, settings map[string]string, connectionLimit int64) error {
+	if !ValidName(role) || connectionLimit < 1 || connectionLimit > 100 {
+		return errors.New("invalid role limits")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, e := m.Pool.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback(ctx)
+	name := pgx.Identifier{role}.Sanitize()
+	for _, key := range []string{"statement_timeout", "idle_in_transaction_session_timeout", "temp_file_limit", "lock_timeout"} {
+		value, ok := settings[key]
+		if !ok || !settingValue.MatchString(value) {
+			return errors.New("invalid role limits")
+		}
+		if _, e = tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s SET %s = '%s'", name, key, value)); e != nil {
+			return e
+		}
+	}
+	if _, e = tx.Exec(ctx, fmt.Sprintf("ALTER ROLE %s CONNECTION LIMIT %d", name, connectionLimit)); e != nil {
+		return e
+	}
+	return tx.Commit(ctx)
+}
+
+var settingValue = regexp.MustCompile(`^(-1|[0-9]{1,10}(ms|kB))$`)
+
+// RoleLimits reports what PostgreSQL currently holds for each project role:
+// the role-wide settings (any database) and the connection limit.
+type RoleState struct {
+	Settings        map[string]string
+	ConnectionLimit int64
+}
+
+func (m *Management) RoleStates(ctx context.Context) (map[string]RoleState, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rows, e := m.Pool.Query(ctx, `SELECT r.rolname, r.rolconnlimit, COALESCE(s.setconfig, '{}')
+		FROM pg_roles r LEFT JOIN pg_db_role_setting s ON s.setrole=r.oid AND s.setdatabase=0
+		WHERE r.rolname ~ '^app_[a-f0-9]{12}$'`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := map[string]RoleState{}
+	for rows.Next() {
+		var name string
+		var limit int64
+		var config []string
+		if e := rows.Scan(&name, &limit, &config); e != nil {
+			return nil, e
+		}
+		state := RoleState{Settings: map[string]string{}, ConnectionLimit: limit}
+		for _, item := range config {
+			if key, value, ok := strings.Cut(item, "="); ok {
+				state.Settings[key] = value
+			}
+		}
+		out[name] = state
+	}
+	return out, rows.Err()
+}
+
+type RoleUse struct {
+	Role        string `json:"role"`
+	Limit       int64  `json:"limit"`
+	Connections int64  `json:"connections"`
+}
+
+// Budget compares connection limits and live client sessions with what
+// PostgreSQL will accept from ordinary roles.
+type Budget struct {
+	MaxConnections    int64     `json:"max_connections"`
+	SuperuserReserved int64     `json:"superuser_reserved"`
+	Reserved          int64     `json:"reserved"`
+	Available         int64     `json:"available"`
+	ProjectsUsed      int64     `json:"projects_used"`
+	ProjectsLimit     int64     `json:"projects_limit"`
+	Roles             []RoleUse `json:"roles"`
+	System            []RoleUse `json:"system"`
+	OtherUsed         int64     `json:"other_used"`
+}
+
+func (m *Management) ConnectionBudget(ctx context.Context) (Budget, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var b Budget
+	e := m.Pool.QueryRow(ctx, `SELECT current_setting('max_connections')::bigint, current_setting('superuser_reserved_connections')::bigint,
+		COALESCE(current_setting('reserved_connections', true), '0')::bigint`).Scan(&b.MaxConnections, &b.SuperuserReserved, &b.Reserved)
+	if e != nil {
+		return b, e
+	}
+	b.Available = b.MaxConnections - b.SuperuserReserved - b.Reserved
+	rows, e := m.Pool.Query(ctx, `SELECT r.rolname, r.rolconnlimit, count(a.pid)
+		FROM pg_roles r LEFT JOIN pg_stat_activity a ON a.usename=r.rolname AND a.backend_type='client backend'
+		WHERE r.rolname ~ '^app_[a-f0-9]{12}$' OR r.rolname IN ('pgfy_mgmt','pgfy_health')
+		GROUP BY r.rolname, r.rolconnlimit ORDER BY r.rolname`)
+	if e != nil {
+		return b, e
+	}
+	defer rows.Close()
+	b.Roles, b.System = []RoleUse{}, []RoleUse{}
+	for rows.Next() {
+		var u RoleUse
+		if e := rows.Scan(&u.Role, &u.Limit, &u.Connections); e != nil {
+			return b, e
+		}
+		if ValidName(u.Role) {
+			b.Roles = append(b.Roles, u)
+			b.ProjectsUsed += u.Connections
+			b.ProjectsLimit += u.Limit
+		} else {
+			b.System = append(b.System, u)
+		}
+	}
+	if e = rows.Err(); e != nil {
+		return b, e
+	}
+	e = m.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend'
+		AND usename !~ '^app_[a-f0-9]{12}$' AND usename NOT IN ('pgfy_mgmt','pgfy_health')`).Scan(&b.OtherUsed)
+	return b, e
 }
 
 // EnsureDatabase creates the project database owned by its role and keeps

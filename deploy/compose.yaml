@@ -48,7 +48,7 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
       PGDATA: /var/lib/postgresql/18/docker
-    command: [postgres, -c, password_encryption=scram-sha-256, -c, hba_file=/etc/pgfy/pg/pg_hba.conf, -c, log_statement=none, -c, log_min_error_statement=panic, -c, max_connections=150, -c, ssl=on, -c, ssl_cert_file=/etc/pgfy/tls/server.crt, -c, ssl_key_file=/etc/pgfy/tls/server.key, -c, ssl_min_protocol_version=TLSv1.2]
+    command: [postgres, -c, password_encryption=scram-sha-256, -c, hba_file=/etc/pgfy/pg/pg_hba.conf, -c, log_statement=none, -c, log_min_error_statement=panic, -c, max_connections=150, -c, reserved_connections=10, -c, ssl=on, -c, ssl_cert_file=/etc/pgfy/tls/server.crt, -c, ssl_key_file=/etc/pgfy/tls/server.key, -c, ssl_min_protocol_version=TLSv1.2]
     ports:
       - "${PG_BIND:?postgres bind address is required}:5432:5432"
     volumes:

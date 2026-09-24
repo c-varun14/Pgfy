@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/c-varun14/Pgfy/internal/hba"
@@ -20,16 +21,36 @@ import (
 // from anywhere until the user restricts it.
 var DefaultAddresses = []string{"0.0.0.0/0", "::/0"}
 
+// Roles is the part of PostgreSQL management provisioning needs; tests
+// substitute it to exercise crash and race paths without a server.
+type Roles interface {
+	EnsureRole(ctx context.Context, name, password string, connectionLimit int64) error
+	EnsureDatabase(ctx context.Context, name, owner string) error
+	ApplyLimits(ctx context.Context, role string, settings map[string]string, connectionLimit int64) error
+	RoleStates(ctx context.Context) (map[string]postgres.RoleState, error)
+	SetPassword(ctx context.Context, role, password string) error
+	TerminateSessions(ctx context.Context, database, role string) error
+}
+
 type Provisioner struct {
 	Store *store.Store
 	Vault *security.Vault
-	PG    *postgres.Management
+	PG    Roles
 	HBA   *hba.Manager
 	kick  chan struct{}
+
+	locks sync.Map // project ID → *sync.Mutex guarding every rotation step
 }
 
-func New(s *store.Store, v *security.Vault, pg *postgres.Management, h *hba.Manager) *Provisioner {
+func New(s *store.Store, v *security.Vault, pg Roles, h *hba.Manager) *Provisioner {
 	return &Provisioner{Store: s, Vault: v, PG: pg, HBA: h, kick: make(chan struct{}, 1)}
+}
+
+// RotationLock serialises everything that changes a project's password: the
+// dashboard's rotate request and the loop that finishes interrupted ones.
+func (p *Provisioner) RotationLock(projectID string) *sync.Mutex {
+	lock, _ := p.locks.LoadOrStore(projectID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 // Kick wakes the loop without blocking the caller.
@@ -62,6 +83,8 @@ func (p *Provisioner) pass(ctx context.Context) {
 		// A rollback restores metadata, not PostgreSQL: create nothing it would orphan.
 		return
 	}
+	p.FinishRotations(ctx)
+	p.SyncLimits(ctx)
 	projects, e := p.Store.IncompleteProjects(ctx)
 	if e != nil {
 		slog.Error("provisioning queue unavailable", "reason", e.Error())
@@ -97,13 +120,21 @@ func (p *Provisioner) provision(ctx context.Context, project store.Project) erro
 	if e != nil {
 		return errors.New("stored credentials cannot be decrypted with this installation key")
 	}
+	limits, e := p.Store.ProjectLimits(ctx, project.ID)
+	if e != nil {
+		return e
+	}
 	stages := []struct {
 		name string
 		run  func(context.Context) error
 	}{
-		{"role_created", func(ctx context.Context) error { return p.PG.EnsureRole(ctx, project.RoleName, string(password)) }},
+		{"role_created", func(ctx context.Context) error { return p.PG.EnsureRole(ctx, project.RoleName, string(password), limits.ConnectionLimit) }},
 		{"database_created", func(ctx context.Context) error { return p.PG.EnsureDatabase(ctx, project.DBName, project.RoleName) }},
 		{"ready", func(ctx context.Context) error {
+			// A project never serves without its guardrails.
+			if e := p.applyLimits(ctx, project.ID, project.RoleName, limits); e != nil {
+				return e
+			}
 			st, e := p.Store.PolicyState(ctx, project.ID)
 			if e != nil {
 				return e
@@ -210,4 +241,119 @@ func (p *Provisioner) SyncPolicy(ctx context.Context) error {
 		}
 	}
 	return applyErr
+}
+
+func (p *Provisioner) applyLimits(ctx context.Context, projectID, role string, l store.ProjectLimits) error {
+	settings := postgres.LimitSettings(l.StatementTimeoutMS, l.IdleInTransactionMS, l.TempFileLimitKB, l.LockTimeoutMS)
+	if e := p.PG.ApplyLimits(ctx, role, settings, l.ConnectionLimit); e != nil {
+		return e
+	}
+	return p.Store.MarkLimitsApplied(ctx, projectID, l.Revision)
+}
+
+// SyncLimits brings every ready role's guardrails to what the operator set.
+// Besides new revisions it repairs drift: the three timeouts are ordinary role
+// settings a project could reset on itself. Only the limit keys are compared,
+// so the write freeze and anything else on the role are left alone.
+func (p *Provisioner) SyncLimits(ctx context.Context) {
+	projects, e := p.Store.ReadyProjectLimits(ctx)
+	if e != nil || len(projects) == 0 {
+		return
+	}
+	states, e := p.PG.RoleStates(ctx)
+	if e != nil {
+		slog.Warn("role limits could not be read", "reason", e.Error())
+		return
+	}
+	for _, project := range projects {
+		state, found := states[project.Role]
+		if !found {
+			continue
+		}
+		want := postgres.LimitSettings(project.StatementTimeoutMS, project.IdleInTransactionMS, project.TempFileLimitKB, project.LockTimeoutMS)
+		drifted := state.ConnectionLimit != project.ConnectionLimit
+		for key, value := range want {
+			if state.Settings[key] != value {
+				drifted = true
+			}
+		}
+		if !drifted {
+			if project.AppliedRevision < project.Revision {
+				_ = p.Store.MarkLimitsApplied(ctx, project.ProjectID, project.Revision)
+			}
+			continue
+		}
+		if e := p.applyLimits(ctx, project.ProjectID, project.Role, project.ProjectLimits); e != nil {
+			slog.Warn("role limits not applied", "project", project.ProjectID, "reason", e.Error())
+		}
+	}
+}
+
+// ErrRotationIncomplete means the new password is recorded but PostgreSQL has
+// not confirmed it yet; the provisioner finishes the rotation on its own.
+var ErrRotationIncomplete = errors.New("the password change will be finished automatically")
+
+// Rotate issues a new password for a ready project: recorded first, then set
+// on the role, then every session of the role is ended, and only then does it
+// become the active credential, with its audit row in the same transaction.
+func (p *Provisioner) Rotate(ctx context.Context, project store.Project, entry store.AuditEntry) (string, error) {
+	lock := p.RotationLock(project.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	password := security.Token()
+	sealed := p.Vault.Seal("project:"+project.ID, []byte(password))
+	if e := p.Store.BeginRotation(ctx, project.ID, sealed, entry.RequestID); e != nil {
+		return "", e
+	}
+	if e := p.finishRotation(ctx, project, password, sealed, entry); e != nil {
+		slog.Warn("password rotation incomplete", "project", project.ID, "reason", e.Error())
+		return "", ErrRotationIncomplete
+	}
+	return password, nil
+}
+
+func (p *Provisioner) finishRotation(ctx context.Context, project store.Project, password, sealed string, entry store.AuditEntry) error {
+	if e := p.PG.SetPassword(ctx, project.RoleName, password); e != nil {
+		return e
+	}
+	if e := p.PG.TerminateSessions(ctx, project.DBName, project.RoleName); e != nil {
+		return e
+	}
+	_, e := p.Store.CompleteRotation(ctx, project.ID, sealed, entry)
+	return e
+}
+
+// FinishRotations rolls interrupted rotations forward. A project whose
+// rotation lock is held is being rotated right now and is left to that request.
+func (p *Provisioner) FinishRotations(ctx context.Context) {
+	pending, e := p.Store.PendingRotations(ctx)
+	if e != nil {
+		return
+	}
+	for _, r := range pending {
+		lock := p.RotationLock(r.ProjectID)
+		if !lock.TryLock() {
+			continue
+		}
+		func() {
+			defer lock.Unlock()
+			// Re-read under the lock: the request that held it may have finished.
+			sealed, e := p.Store.PendingPassword(ctx, r.ProjectID)
+			if e != nil || sealed == "" {
+				return
+			}
+			project, e := p.Store.Project(ctx, r.ProjectID)
+			if e != nil {
+				return
+			}
+			password, e := p.Vault.Open("project:"+r.ProjectID, sealed)
+			if e != nil {
+				return
+			}
+			entry := store.AuditEntry{At: time.Now().Unix(), Action: "credentials.rotate", Target: r.ProjectID, RequestID: r.RequestID, Detail: `{"finished":"automatically"}`}
+			if e := p.finishRotation(ctx, project, string(password), sealed, entry); e != nil {
+				slog.Warn("password rotation still incomplete", "project", r.ProjectID, "reason", e.Error())
+			}
+		}()
+	}
 }
