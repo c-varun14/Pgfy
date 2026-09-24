@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,43 @@ import (
 
 //go:embed migrations/*.sql
 var migrations embed.FS
+
+// migrationSources lists every embedded migration directory; a test build can
+// append one to exercise updates that migrate and then roll back.
+var migrationSources = []fs.FS{mustSub(migrations, "migrations")}
+
+func mustSub(f fs.FS, dir string) fs.FS {
+	sub, e := fs.Sub(f, dir)
+	if e != nil {
+		panic(e)
+	}
+	return sub
+}
+
+type migrationFile struct {
+	name string
+	body []byte
+}
+
+func migrationFiles() ([]migrationFile, error) {
+	var files []migrationFile
+	for _, source := range migrationSources {
+		entries, e := fs.ReadDir(source, ".")
+		if e != nil {
+			return nil, e
+		}
+		for _, entry := range entries {
+			body, e := fs.ReadFile(source, entry.Name())
+			if e != nil {
+				return nil, e
+			}
+			files = append(files, migrationFile{entry.Name(), body})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+	return files, nil
+}
+
 var ErrSetup = errors.New("setup unavailable or token invalid")
 var ErrTokenActive = errors.New("setup token has not expired; wait for expiry before replacing it")
 
@@ -60,14 +98,13 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, e = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, checksum TEXT NOT NULL)"); e != nil {
 		return e
 	}
-	files, e := migrations.ReadDir("migrations")
+	files, e := migrationFiles()
 	if e != nil {
 		return e
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
 	known := map[string]bool{}
 	for _, file := range files {
-		known[file.Name()] = true
+		known[file.name] = true
 	}
 	rows, e := tx.QueryContext(ctx, "SELECT name FROM schema_migrations")
 	if e != nil {
@@ -97,13 +134,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return errors.New("database schema is newer than application")
 	}
 	for _, f := range files {
-		b, e := migrations.ReadFile("migrations/" + f.Name())
-		if e != nil {
-			return e
-		}
+		b := f.body
 		checksum := security.Hash(string(b))
 		var existing string
-		e = tx.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE name=?", f.Name()).Scan(&existing)
+		e = tx.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE name=?", f.name).Scan(&existing)
 		if e == nil {
 			if existing != checksum {
 				return errors.New("migration checksum mismatch")
@@ -114,9 +148,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			return e
 		}
 		if _, e = tx.ExecContext(ctx, string(b)); e != nil {
-			return fmt.Errorf("migration %s failed: %w", f.Name(), e)
+			return fmt.Errorf("migration %s failed: %w", f.name, e)
 		}
-		if _, e = tx.ExecContext(ctx, "INSERT INTO schema_migrations(name,checksum) VALUES (?,?)", f.Name(), checksum); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO schema_migrations(name,checksum) VALUES (?,?)", f.name, checksum); e != nil {
 			return e
 		}
 	}

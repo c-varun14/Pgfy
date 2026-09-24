@@ -19,7 +19,8 @@ COPY web/embed.go web/embed.go
 COPY --from=frontend /src/web/dist web/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/pgfy ./cmd/pgfy
+ARG GO_TAGS=
+RUN CGO_ENABLED=0 go build -tags "${GO_TAGS}" -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/pgfy ./cmd/pgfy
 
 FROM ${POSTGRES_IMAGE}
 # The base image ships no CA bundle; backups need to verify object-storage TLS.

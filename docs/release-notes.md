@@ -1,5 +1,17 @@
 # Release notes
 
+## Unreleased — updater (`mvp-to-production`)
+
+- `pgfyctl update <bundle>` moves an installation to a newer release: verify, pause jobs and changes (`--drain` waits
+  for a running backup), snapshot SQLite and the rewritten files, switch, migrate, verify readiness, and roll back
+  automatically on any failure or interruption. `pgfyctl rollback-update` finishes an interrupted one. A successful
+  update restarts PostgreSQL and Caddy once; a rollback restarts them twice. Everyone is signed out.
+- The dashboard shows when an update is in progress; writes are refused with `503 maintenance` until it finishes.
+- `rollback-hostname` restores only access settings and regenerates the Caddyfile, so it cannot revert a release.
+- Release bundles are checked for integrity by the installed release and for policy (PostgreSQL 18 on bookworm, any
+  minor version) by the release itself.
+- The CI integration run exercises a rollback after a test-only migration; tagged release builds do not.
+
 ## Unreleased — Tier 0 A: backup correctness (`mvp-to-production`)
 
 Post-hackathon work from `docs/phases.md` Phase 6. This is the last release that ships as a manual reinstall;

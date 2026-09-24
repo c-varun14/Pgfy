@@ -33,6 +33,88 @@ class patch_atomic_owner:
     def __exit__(self, *exc):
         host.atomic = self.original
 
+def write_bundle(directory, version, application_image, images):
+    """A release bundle from this checkout's deploy files, pointing at a locally built application image."""
+    import hashlib
+    directory.mkdir(parents=True)
+    names = ["installer.py", "install.sh", "pgfyctl", "compose.yaml", "compose.https.yaml", "compose.tunnel.yaml", "postgres/init.sh", "postgres/health.sh"]
+    for name in names:
+        (directory / name).parent.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_bytes((ROOT / "deploy" / name).read_bytes())
+    release = {"version": version, "images": {"application": application_image, "postgres": images["postgres"], "caddy": images["caddy"]}}
+    (directory / "release.json").write_text(json.dumps(release))
+    names.append("release.json")
+    (directory / "SHA256SUMS").write_text("".join(f"{hashlib.sha256((directory / n).read_bytes()).hexdigest()}  {n}\n" for n in names))
+    return release
+
+def update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed):
+    """pgfyctl update: a failure after the new release migrated rolls everything back; a clean update commits."""
+    current = write_bundle(directory / "releases/v0.0.1", "v0.0.1", application_image, images)
+    state = dict(installation.state, release="v0.0.1", images=current["images"], stage="installed")
+    host.json_write(directory / "state.json", state)
+    cfg = dict(installation.config(), release="v0.0.1")
+    host.json_write(directory / "config/install.json", cfg, 0o644)
+    host.atomic(directory / "compose.env", host.compose_env(directory, state, cfg))
+    host.write_pgfyctl(directory, directory / "releases/v0.0.1")
+    write_bundle(directory / "incoming/pgfy-v0.0.2", "v0.0.2", next_image, images)
+    def probe(query):
+        run([*helper, "mkdir -p /fixture/probe && cp /fixture/data/sqlite/pgfy.db* /fixture/probe/ && chmod -R a+rwX /fixture/probe"])
+        import sqlite3
+        with sqlite3.connect(directory / "probe/pgfy.db") as db:
+            result = db.execute(query).fetchall()
+        run([*helper, "rm -rf /fixture/probe"])
+        return result
+    def signed_in():
+        assert request("/api/v1/auth/login", {"email": "admin@example.com", "password": password})[0] == 200
+        code, session = request("/api/v1/auth/session")
+        assert code == 200
+        return session
+    def project_ids():
+        return sorted((p["id"], p["name"], p["stage"]) for p in request("/api/v1/projects")[1]["projects"])
+    projects_before = project_ids()
+    original = {"DIGEST": host.DIGEST, "pull_images": host.pull_images, "run_converge": host.run_converge, "verify": host.Installation.verify}
+    verified = []
+    def verify_then_fail_once(self, require_dependencies=True):
+        original["verify"](self, require_dependencies)
+        verified.append(self.state["release"])
+        if len(verified) == 1:
+            migrated = probe("SELECT name FROM schema_migrations WHERE name='999_updatetest.sql'")
+            assert migrated, "the new release did not migrate before the injected failure"
+            raise host.InstallError("injected failure after the new release migrated")
+    host.DIGEST = __import__("re").compile(r"[a-zA-Z0-9./:_-]+(@sha256:[a-f0-9]{64})?\Z")  # local images carry no registry digest
+    host.pull_images = lambda images: None
+    host.run_converge = lambda installation, bundle, lock_fd: host.converge_steps(installation)
+    host.Installation.verify = verify_then_fail_once
+    try:
+        with patch_atomic_owner():
+            try:
+                host.update(directory, directory / "incoming/pgfy-v0.0.2")
+                raise AssertionError("the injected failure did not stop the update")
+            except host.InstallError as error:
+                assert "Restored v0.0.1" in str(error), error
+            assert verified == ["v0.0.2", "v0.0.1"], verified
+            assert host.read_json(directory / "state.json")["release"] == "v0.0.1"
+            assert not (directory / "update-rollback").exists()
+            assert not probe("SELECT name FROM schema_migrations WHERE name='999_updatetest.sql'"), "rollback kept the new schema"
+            session = signed_in()
+            assert project_ids() == projects_before
+            status = request("/api/v1/system/status")[1]
+            assert status["ready"] and not status["maintenance"] and status["versions"]["application"] != "v0.0.2"
+            passed("an update that fails after migrating restores the previous release, its storage snapshot and configuration")
+            host.update(directory, directory / "incoming/pgfy-v0.0.2")
+            assert host.read_json(directory / "state.json")["release"] == "v0.0.2"
+            assert "releases/v0.0.2/installer.py" in (directory / "pgfyctl").read_text()
+            assert probe("SELECT count(*) FROM schema_migrations WHERE name='999_updatetest.sql'") == [(1,)]
+            assert request("/api/v1/projects")[0] == 401, "sessions from before the update stayed valid"
+            session = signed_in()
+            assert project_ids() == projects_before
+            status = request("/api/v1/system/status")[1]
+            assert status["ready"] and not status["maintenance"] and status["versions"]["application"] == "v0.0.2"
+            assert request("/api/v1/projects", {"name": "after-update"}, session["csrf_token"])[0] == 202
+            passed("pgfyctl update migrates, verifies, resumes backups and signs sessions out")
+    finally:
+        host.DIGEST, host.pull_images, host.run_converge, host.Installation.verify = original["DIGEST"], original["pull_images"], original["run_converge"], original["verify"]
+
 def main():
     started = time.monotonic()
     images = json.loads((ROOT / "deploy/images.lock.json").read_text())
@@ -512,6 +594,9 @@ def main():
             for value in sensitive_values:
                 assert value not in logs
             passed("setup token, password, and database credentials absent from container logs")
+            next_image = os.environ.get("PGFY_TEST_NEXT_IMAGE")
+            if next_image:
+                update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed)
             evidence["container_stats"] = compose("stats", "--no-stream", "--format", "json").stdout
             evidence["seconds"] = round(time.monotonic() - started, 2)
             evidence["volume_identities"] = volumes_before

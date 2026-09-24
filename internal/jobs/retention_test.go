@@ -444,3 +444,30 @@ func TestRetentionKeepsTheLastDayWhole(t *testing.T) {
 		t.Fatal("an older day was not thinned to its newest backup")
 	}
 }
+
+// During an update the bucket is read, never changed: a rollback restores
+// metadata but cannot bring back an object the release being tried deleted.
+func TestMaintenanceReadsTheBucketButDeletesNothing(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	w, s := testWorker(t, now)
+	ctx := context.Background()
+	fake := newFakeStore()
+	for _, day := range []string{"20260301T000000Z", "20260220T000000Z", "20260101T000000Z"} {
+		fake.put("app_shop", day, manifestFor("prj_shop", "Shop"))
+	}
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0}, now); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.SetMaintenance(ctx, true); e != nil {
+		t.Fatal(e)
+	}
+	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
+		t.Fatal(e)
+	}
+	if len(fake.removed) != 0 {
+		t.Fatal("objects deleted during maintenance", fake.removed)
+	}
+	if seen, _ := s.PrefixBackups(ctx, testSettings().Target(), "app_shop"); len(seen) != 3 {
+		t.Fatal("the listing was not recorded", stamps(seen))
+	}
+}

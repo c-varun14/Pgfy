@@ -56,6 +56,13 @@ func (s *Store) enqueue(ctx context.Context, id, kind, projectID, input string, 
 		return Job{}, e
 	}
 	defer tx.Rollback()
+	// Checked first so nothing, not even the attempt time, is written while an
+	// update holds the installation quiet.
+	if on, e := maintenance(ctx, tx); e != nil {
+		return Job{}, e
+	} else if on {
+		return Job{}, ErrMaintenance
+	}
 	var active int
 	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM jobs WHERE state IN ('queued','running')").Scan(&active); e != nil {
 		return Job{}, e
@@ -145,7 +152,12 @@ func (s *Store) ClaimJob(ctx context.Context, now time.Time) (*Job, error) {
 	if e != nil {
 		return nil, e
 	}
-	if _, e = tx.ExecContext(ctx, "UPDATE jobs SET state='running', stage='starting', started_at=?, stage_at=? WHERE id=?", now.Unix(), now.Unix(), j.ID); e != nil {
+	result, e := tx.ExecContext(ctx, "UPDATE jobs SET state='running', stage='starting', started_at=?, stage_at=? WHERE id=? AND "+maintenanceGuard, now.Unix(), now.Unix(), j.ID)
+	if e != nil {
+		return nil, e
+	}
+	if n, e := result.RowsAffected(); e != nil || n == 0 {
+		// Queued work waits for the update to finish.
 		return nil, e
 	}
 	if e = tx.Commit(); e != nil {

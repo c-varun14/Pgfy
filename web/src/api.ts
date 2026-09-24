@@ -60,6 +60,7 @@ export type DatabaseAccess = {
 };
 export type Status = {
   ready: boolean;
+  maintenance?: boolean;
   sqlite: { status: string; version: string };
   postgres: { status: string; version: string };
   versions: Record<string, string>;
