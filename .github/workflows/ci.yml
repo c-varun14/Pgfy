@@ -45,6 +45,7 @@ jobs:
           path: |
             web/test-results/
             .cache/integration-results.json
+            .cache/integration-failure.log
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: verify

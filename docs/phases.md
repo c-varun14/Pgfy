@@ -398,6 +398,15 @@ PgBouncer until measured connection pressure shows the budget is insufficient (t
 recovery until a client's accepted backup target interval is shorter than one hour; high availability; automated major-version upgrades; a
 SQL editor; DNS-01 issuance; IPv6 probing; client-side backup encryption; signed manifests; team permissions (never).
 
+### Status (2026-09-24)
+
+Tier 0 is implemented on `mvp-to-production`: A (backup correctness), the updater (`pgfyctl update` with automatic
+rollback), B (open-to-internet marker, connection budget with reserved slots, per-role guardrails, credential rotation,
+audit table), the rest of C (host status timer, certificate expiry, unattended upgrades, host runbook, webhook alerts)
+and D (TOTP second factor mandatory over HTTPS, SSH-issued reset). Each is covered by unit tests and by the local
+Compose integration run; the evidence the gate still needs from real servers and real operation is tracked in the
+[production gate checklist](production-gate.md). Tier 1 has not started.
+
 ### Sequencing
 
 A → the updater → B → the rest of C → D → Tier 1 → the gate below → remove the "hackathon MVP" wording. A comes before the updater

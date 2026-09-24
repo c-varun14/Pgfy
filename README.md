@@ -25,7 +25,8 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 
 ## Planned, not implemented
 
-- Project deletion, and the other items in the post-hackathon
+- Project deletion and the other Tier 1 items, and the evidence still owed to the
+  [production gate](docs/production-gate.md), from the post-hackathon
   [production-readiness roadmap](docs/phases.md#phase-6--post-demo-hardening-and-operation) (Phase 6). That work happens on the
   `mvp-to-production` branch; `main` is the hackathon submission.
 - The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.
