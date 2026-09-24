@@ -58,6 +58,10 @@ func (p *Provisioner) Run(ctx context.Context) {
 }
 
 func (p *Provisioner) pass(ctx context.Context) {
+	if on, e := p.Store.Maintenance(ctx); e != nil || on {
+		// A rollback restores metadata, not PostgreSQL: create nothing it would orphan.
+		return
+	}
 	projects, e := p.Store.IncompleteProjects(ctx)
 	if e != nil {
 		slog.Error("provisioning queue unavailable", "reason", e.Error())

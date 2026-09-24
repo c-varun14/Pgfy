@@ -236,6 +236,9 @@ func (w *Worker) stage(ctx context.Context, job store.Job, name string) {
 // rather than by creation is what stops one failing project from holding up
 // every project behind it.
 func (w *Worker) scheduleBackups(ctx context.Context) {
+	if on, e := w.Store.Maintenance(ctx); e != nil || on {
+		return
+	}
 	settings, e := w.StorageSettings(ctx)
 	if e != nil {
 		return

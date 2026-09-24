@@ -99,6 +99,11 @@ func (w *Worker) reconcile(ctx context.Context, client objectStore, settings sto
 	} else if n > 0 {
 		slog.Warn("backups are no longer in the bucket", "count", n)
 	}
+	if on, e := w.Store.Maintenance(ctx); e != nil || on {
+		// During an update the bucket is only read: a rollback cannot bring
+		// back an object deleted by the release being tried.
+		return nil
+	}
 	w.retain(ctx, client, settings, databases)
 	w.pruneHistory(ctx)
 	return nil

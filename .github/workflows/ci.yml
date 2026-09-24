@@ -1,7 +1,7 @@
 name: Verify and release
 on:
   push:
-    branches: [main]
+    branches: [main, mvp-to-production]
     tags: ['v*']
   pull_request:
 permissions:
@@ -25,13 +25,18 @@ jobs:
       - run: pnpm --dir web install --frozen-lockfile --ignore-scripts
       - run: pnpm --dir web build
       - run: go vet ./... && go test -race ./...
+      - run: go vet -tags updatetest ./... && go test -tags updatetest ./internal/store
       - run: python3 -m unittest discover -s deploy/tests -v
       - run: bash -n deploy/bootstrap.sh deploy/install.sh deploy/pgfyctl deploy/postgres/*.sh
       - run: go build -o bin/pgfy ./cmd/pgfy
       - run: pnpm --dir web exec playwright install --with-deps chromium
       - run: pnpm --dir web test:e2e
       - run: python3 scripts/build-image.py
+      # A test-only next release carrying an extra migration, so the update phase proves a rollback after migrating.
+      - run: python3 scripts/build-image.py --tag pgfy:dev-next --version v0.0.2 --go-tags updatetest
       - run: python3 scripts/integration.py
+        env:
+          PGFY_TEST_NEXT_IMAGE: pgfy:dev-next
       - uses: actions/upload-artifact@v4
         if: always()
         with:

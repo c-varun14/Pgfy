@@ -15,6 +15,7 @@ import (
 	"net/mail"
 	"net/netip"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -163,10 +164,20 @@ func (s *Server) Handler() http.Handler {
 				failure(w, 503, "metadata_unavailable", "Management storage is unavailable. Run host diagnostics.")
 				return
 			}
+			if r.Method != "GET" && r.Method != "HEAD" && !maintenanceExempt[path.Clean(r.URL.Path)] {
+				// Nothing a rollback would have to undo may be written during an update.
+				if on, e := s.Store.Maintenance(r.Context()); e != nil || on {
+					failure(w, 503, "maintenance", "An update is in progress. Try again when it finishes.")
+					return
+				}
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
+
+// Signing in and out stays possible while an update holds the installation quiet.
+var maintenanceExempt = map[string]bool{"/api/v1/setup": true, "/api/v1/auth/login": true, "/api/v1/auth/logout": true}
 
 type baseContextKey struct{}
 
@@ -389,7 +400,8 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	var sqliteVersion string
 	_ = s.Store.DB.QueryRowContext(r.Context(), "SELECT sqlite_version()").Scan(&sqliteVersion)
-	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": s.backupStatus(r), "database_access": s.databaseAccess()})
+	maintenance, _ := s.Store.Maintenance(r.Context())
+	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "maintenance": maintenance, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": s.backupStatus(r), "database_access": s.databaseAccess()})
 }
 
 // backupStatus answers from the reconciled view in SQLite, so it stays cheap

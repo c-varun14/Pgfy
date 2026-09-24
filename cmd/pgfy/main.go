@@ -27,6 +27,8 @@ import (
 	"github.com/c-varun14/Pgfy/web"
 )
 
+const usage = "usage: pgfy [serve|version|health [ready]|setup-token|initialize-store|maintenance on|off|status|jobs running|store-snapshot <path>|store-restore [--check] <path>]"
+
 var version = "dev"
 var commit = "unknown"
 
@@ -62,11 +64,17 @@ func run() error {
 		}
 		return nil
 	}
+	dbPath := config.Env("PGFY_DB", "/data/pgfy.db")
+	if command == "store-snapshot" || command == "store-restore" {
+		// Run by the host updater with the release that owns the data, before
+		// any configuration or migration: a snapshot must be taken and restored
+		// whatever schema the file carries.
+		return storeFile(command, os.Args[2:], dbPath)
+	}
 	cfg, e := config.Load(config.Env("PGFY_CONFIG", "/etc/pgfy/install.json"))
 	if e != nil {
 		return errors.New("invalid or missing installation configuration")
 	}
-	dbPath := config.Env("PGFY_DB", "/data/pgfy.db")
 	var s *store.Store
 	var storeErr error
 	if command == "initialize-store" {
@@ -116,8 +124,16 @@ func run() error {
 		fmt.Println(token)
 		return nil
 	}
+	if command == "maintenance" || command == "jobs" {
+		if storeErr != nil {
+			return errors.New("management storage unavailable")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return hostCommand(ctx, s, command, os.Args[2:])
+	}
 	if command != "serve" {
-		return errors.New("usage: pgfy [serve|version|health [ready]|setup-token|initialize-store]")
+		return errors.New(usage)
 	}
 	if storeErr != nil {
 		slog.Error("management storage initialization failed; readiness disabled")
@@ -184,4 +200,54 @@ func run() error {
 		return errors.New("HTTP server failed")
 	}
 	return nil
+}
+
+// hostCommand serves the updater: it quiesces the installation and reports
+// whether heavy work is running. Output is a single word or number.
+func hostCommand(ctx context.Context, s *store.Store, command string, args []string) error {
+	if len(args) != 1 {
+		return errors.New(usage)
+	}
+	switch command + " " + args[0] {
+	case "maintenance on", "maintenance off":
+		return s.SetMaintenance(ctx, args[0] == "on")
+	case "maintenance status":
+		on, e := s.Maintenance(ctx)
+		if e != nil {
+			return e
+		}
+		if on {
+			fmt.Println("on")
+		} else {
+			fmt.Println("off")
+		}
+		return nil
+	case "jobs running":
+		n, e := s.RunningJobs(ctx)
+		if e != nil {
+			return e
+		}
+		fmt.Println(n)
+		return nil
+	}
+	return errors.New(usage)
+}
+
+func storeFile(command string, args []string, dbPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	check := len(args) == 2 && args[0] == "--check"
+	if len(args) != 1 && !check {
+		return errors.New(usage)
+	}
+	path := args[len(args)-1]
+	switch {
+	case command == "store-snapshot" && !check:
+		return store.Snapshot(ctx, dbPath, path)
+	case command == "store-restore" && check:
+		return store.CheckSnapshot(ctx, path)
+	case command == "store-restore":
+		return store.Restore(ctx, path, dbPath)
+	}
+	return errors.New(usage)
 }

@@ -92,6 +92,9 @@ sudo /opt/firstcommit/pgfyctl hostname new-admin.example.com
 sudo /opt/firstcommit/pgfyctl rollback-hostname
 sudo /opt/firstcommit/pgfyctl tunnel
 sudo /opt/firstcommit/pgfyctl sync-db-cert
+sudo /opt/firstcommit/pgfyctl update /path/to/pgfy-vX.Y.Z
+sudo /opt/firstcommit/pgfyctl rollback-update
+sudo /opt/firstcommit/pgfyctl maintenance status|off
 ```
 
 `sync-db-cert` copies the certificate Caddy obtained for the dashboard hostname into PostgreSQL (validated, key permissions fixed, previous pair kept), reloads, and confirms a new TLS handshake presents it. The installer runs it once and installs a daily `pgfy-cert.timer` for renewals. Until it has succeeded, PostgreSQL serves a self-signed placeholder and the dashboard says so.
@@ -106,7 +109,7 @@ If the domain is unusable, explicitly run `pgfyctl tunnel` from SSH, then connec
 
 ## Persistence and reruns
 
-Retain the exact release bundle. Running its installation command again preserves release selection, installation identity, volume names, configuration, and secrets. A different release is rejected; updates are a separate future procedure.
+Retain the exact release bundle. Running its installation command again preserves release selection, installation identity, volume names, configuration, and secrets. A different release is rejected; move to a newer release with `pgfyctl update` (below).
 
 The installation contains:
 
@@ -121,11 +124,49 @@ The installation contains:
 | `secrets/bootstrap_password` | PostgreSQL bootstrap credential, never mounted into the app |
 | `secrets/health_password` | Restricted PostgreSQL health-query credential |
 | `secrets/management_password` | Non-superuser provisioning credential (`pgfy_mgmt`) used by the dashboard |
-| `releases/` | Verified installed bundle and host command implementation |
+| `releases/` | Verified installed bundles (current and earlier) and the host command implementation |
+| `update-rollback/`, `data/sqlite/.update-rollback.db` | Present only while an update runs, or after one was interrupted: the files and storage snapshot a rollback restores |
 
 Secret files use fixed container identities: bootstrap password owner/group `999:999`, mode `0400`; health and management passwords `10001:999`, mode `0440`; encryption key `10001:10001`, mode `0400`. The SQLite directory belongs to `10001:10001`, mode `0700`. Reruns reject unexpected secret ownership/permissions instead of rewriting them.
 
 The app creates no fresh SQLite database during normal startup. Missing metadata fails closed. Do not replace missing SQLite/key files with empty ones or regenerate secrets beside existing data. A metadata/key backup must preserve their association. Phase 1 does not supply a disaster-recovery solution.
+
+## Updating
+
+Download the newer release bundle, verify it as for installation, extract it, and run the installed wrapper:
+
+```sh
+tar -xzf pgfy-vX.Y.Z.tar.gz
+sudo /opt/firstcommit/pgfyctl update ./pgfy-vX.Y.Z
+```
+
+The installed release performs the update and, if needed, the rollback:
+
+1. It verifies the new bundle's checksums, pinned digests and version, copies it into `releases/`, pulls its images and
+   validates its Compose configuration. Nothing has changed yet; a failure here leaves the server as it was.
+2. It pauses the installation: new backups, restores and dashboard changes are refused, and no job starts. If a backup
+   or restore is running it refuses, or with `--drain` waits up to two hours for it to finish.
+3. It stops the application and snapshots management storage (SQLite, with `VACUUM INTO` and an integrity check) and
+   the files it is about to rewrite (`state.json`, `compose.env`, `config/install.json`, the Caddyfile, `pg_hba.conf`,
+   `pgfyctl`).
+4. It switches to the new release, applies the new release's host configuration, recreates the three services
+   (PostgreSQL and Caddy restart once) and waits for full readiness. The new release migrates SQLite as it starts.
+5. On success it resumes backups and removes the snapshot. Everyone is signed out.
+
+If anything fails or the command is interrupted after the snapshot (including a dropped SSH session), the previous
+release restores the snapshot and its files, starts, verifies readiness and reports what failed; PostgreSQL and Caddy
+restart once more. Nothing is restored before the snapshot has been checked, and a damaged snapshot stops the
+rollback with everything kept for inspection. If the host itself went down mid-update, run `pgfyctl rollback-update`.
+
+What a rollback does not undo: releases only make PostgreSQL and host changes that the previous release can run with,
+and while paused the new release does not provision databases or delete anything from the bucket.
+
+Updates move forward only: a stable release to a newer stable release, and a pre-release to a later pre-release of the
+same version or to a stable release. Pre-releases are for test hosts. Updates within PostgreSQL 18 are supported; a
+different major version or base image is refused. An update is not a way to repair a broken installation — run
+`pgfyctl diagnostics` first. If an update warns that backups are still paused, run `pgfyctl maintenance off`.
+
+The first release that includes `update` is installed by the manual reinstall procedure; later ones use `update`.
 
 ## Failure handling
 
@@ -134,7 +175,8 @@ The app creates no fresh SQLite database during normal startup. Missing metadata
 - **Partial PostgreSQL initialization:** stop and inspect host logs and the existing volume. An initialized data directory does not cause Docker initialization scripts to run again. Pgfy checks a final marker and authenticated database identity; it never deletes or blindly reinitializes a partial directory.
 - **SQLite migration failure/missing storage:** liveness and static dashboard assets remain available; readiness and protected operations fail. Restore the correct metadata or repair the failed migration after preserving a copy.
 - **PostgreSQL outage:** dashboard login and SQLite-backed settings remain available; readiness and PostgreSQL status show failure.
-- **Hostname-change interruption:** use host rollback; explicitly enable tunnel mode if necessary.
+- **Hostname-change interruption:** use host rollback; explicitly enable tunnel mode if necessary. `rollback-hostname` restores only the access mode and hostname, never an earlier release.
+- **Update interruption:** run `pgfyctl rollback-update`; `diagnostics` reports a leftover update and paused backups.
 
 Diagnostics print safe state, not raw credentials or container logs. Operators can inspect restricted logs through Docker on the host. Do not share unreviewed logs or the installation's secret files.
 

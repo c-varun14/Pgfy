@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, APIError, setCSRF, type Session, type Settings, type Status } from "./api";
 import { Shell } from "./components/Shell";
 import { BrandMark } from "./components/Brand";
-import { ErrorNotice } from "./components/ui/banner";
+import { Banner, ErrorNotice } from "./components/ui/banner";
 import { Skeleton } from "./components/ui/skeleton";
 import { useRoute } from "./router";
 import { AuthPage } from "./pages/Auth";
@@ -53,6 +53,7 @@ export function App() {
   const area = projectMatch ? "project" : path === "/backups" || path === "/recovery" ? "backups" : path === "/settings" ? "settings" : "databases";
   return <Shell path={path} session={session} status={status} settings={settings} navigate={navigate} onLogout={() => void logout()}>
     {error && <ErrorNotice message={error} />}
+    {status?.maintenance && <Banner tone="warn">An update is in progress on the server. Backups, restores and changes are paused until it finishes; you can keep reading.</Banner>}
     {area === "databases" && <DatabasesPage status={status} navigate={navigate} />}
     {area === "project" && <DatabasePage id={projectMatch![1]} session={session} tab={params.get("tab")} navigate={navigate} />}
     {area === "backups" && <BackupsPage navigate={navigate} />}

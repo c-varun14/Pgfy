@@ -9,7 +9,7 @@ All application endpoints use JSON under `/api/v1`. Responses containing authent
 | `POST /api/v1/auth/login` | `{email, password}` | 200, session cookie, `{email, csrf_token}` |
 | `POST /api/v1/auth/logout` | `{}` plus `X-CSRF-Token` | 204, session revoked, cookie cleared |
 | `GET /api/v1/auth/session` | Session cookie | `{email, expires_at, csrf_token, client_ip}` |
-| `GET /api/v1/system/status` | Session cookie | `ready`, SQLite/PostgreSQL states and versions, app/tool versions, backup state, `database_access` |
+| `GET /api/v1/system/status` | Session cookie | `ready`, `maintenance`, SQLite/PostgreSQL states and versions, app/tool versions, backup state, `database_access` |
 | `GET /api/v1/settings` | Session cookie | Read-only installation identity, hostname/origin/mode, release and recorded host versions |
 | `GET /api/v1/projects` | Session cookie | `{projects: [...], database_access}`; each project carries stage, `failed`, `stage_error`, `size_bytes` (or `size_error`) |
 | `POST /api/v1/projects` | `{name, idempotency_key?}` + CSRF | 202 with the new project (200 when the key repeats); provisioning continues in the background |
@@ -70,3 +70,5 @@ Retention runs after a successful backup: the newest backup of each database is 
 Restores always create a new project: download, SHA-256 verification, PostgreSQL major-version check, provisioning, `pg_restore --no-owner --no-privileges --role=<new role>`, then verification (row counts recorded at backup time, counts of sequences, views, functions, indexes and constraints, ownership, connect privilege). `verification` is `verified`, `partial` (every check that this backup supports passed, but it carries no object baselines or its table list was truncated at 5000) or `failed`; `verified` remains true only for `verified`. A `pg_restore` that exits non-zero, or reports errors, is stored as "completed with N restore errors" with a bounded stderr excerpt: the job succeeds, the database is usable, and it is not called verified. A restore that never ran — the tool could not start, was signalled, timed out or was cancelled — fails the job. The original database is never modified.
 
 There are no APIs for domain changes, cutover confirmation, Caddy administration, public account recovery, or signup after initial setup.
+
+While `pgfyctl update` holds the installation paused (`maintenance: true` in the status), every non-GET API request except setup, sign-in and sign-out returns `503` with code `maintenance`, no job starts, provisioning waits, and reconciliation reads the bucket without deleting anything.

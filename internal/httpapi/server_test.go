@@ -197,3 +197,27 @@ func TestHTTPSCookieAndNoTokenLeak(t *testing.T) {
 		}
 	}
 }
+
+func TestMaintenanceRefusesWritesButNotSignIn(t *testing.T) {
+	f := newFixture(t)
+	cookie, csrf := f.setup(t)
+	if e := f.s.Store.SetMaintenance(context.Background(), true); e != nil {
+		t.Fatal(e)
+	}
+	origin := f.s.Config.Origin
+	for _, path := range []string{"/api/v1/projects", "/api/v1/recovery/restores", "/api/v1/settings/backups", "/api/v1/auth/login/../../projects"} {
+		if r := f.request("POST", path, `{}`, cookie, csrf, origin); r.Code != 503 || !strings.Contains(r.Body.String(), "maintenance") {
+			t.Fatal(path, r.Code, r.Body.String())
+		}
+	}
+	if r := f.request("GET", "/api/v1/system/status", "", cookie, "", ""); r.Code != 200 || !strings.Contains(r.Body.String(), `"maintenance":true`) {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	if r := f.request("POST", "/api/v1/auth/logout", `{}`, cookie, csrf, origin); r.Code == 503 {
+		t.Fatal("sign-out refused during maintenance")
+	}
+	body := `{"email":"admin@example.com","password":"a sufficiently long passphrase"}`
+	if r := f.request("POST", "/api/v1/auth/login", body, nil, "", origin); r.Code != 200 {
+		t.Fatal("sign-in refused during maintenance", r.Code, r.Body.String())
+	}
+}
