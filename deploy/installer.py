@@ -249,7 +249,14 @@ def available_ports(mode):
 
 def ipv6_enabled():
     flag = Path("/proc/sys/net/ipv6/conf/all/disable_ipv6")
-    return socket.has_ipv6 and (not flag.exists() or flag.read_text().strip() == "0")
+    if not socket.has_ipv6 or (flag.exists() and flag.read_text().strip() != "0"):
+        return False
+    # A kernel booted with ipv6.disable=1 has no sysctl and refuses the socket family.
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+    except OSError:
+        return False
+    return True
 
 def select_subnets():
     occupied = []
