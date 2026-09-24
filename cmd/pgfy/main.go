@@ -29,7 +29,7 @@ import (
 	"github.com/c-varun14/Pgfy/web"
 )
 
-const usage = "usage: pgfy [serve|version|health [ready]|setup-token|initialize-store|maintenance on|off|status|jobs running|store-snapshot <path>|store-restore [--check] <path>]"
+const usage = "usage: pgfy [serve|version|health [ready]|setup-token|initialize-store|reset-admin|maintenance on|off|status|jobs running|store-snapshot <path>|store-restore [--check] <path>]"
 
 var version = "dev"
 var commit = "unknown"
@@ -122,6 +122,23 @@ func run() error {
 		token, e := s.NewSetupToken(ctx, time.Now())
 		if e != nil {
 			return e
+		}
+		fmt.Println(token)
+		return nil
+	}
+	if command == "reset-admin" {
+		// The token goes to the operator's terminal only; its hash is stored.
+		if storeErr != nil {
+			return errors.New("management storage unavailable")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		token, e := s.NewResetToken(ctx, time.Now())
+		if errors.Is(e, store.ErrSetup) {
+			return errors.New("no administrator exists yet; use setup-token")
+		}
+		if e != nil {
+			return errors.New("management storage unavailable")
 		}
 		fmt.Println(token)
 		return nil

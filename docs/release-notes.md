@@ -1,5 +1,16 @@
 # Release notes
 
+## Unreleased — second factor (`mvp-to-production`)
+
+- HTTPS mode requires an authenticator-app code after the password; setup enrols the factor before the administrator
+  exists, and an existing administrator enrols one at the next sign-in. Keys are typed, not scanned; no new
+  dependency (RFC 6238 with the standard library).
+- Codes are single-use, allow one step of clock skew, and wrong codes lock code entry with a growing delay that
+  survives restarts; repeated wrong codes and every enrolment or reset are alerted.
+- `pgfyctl reset-admin` issues a one-use, 30-minute token for "Reset access": a new password and factor, applied only
+  when a code confirms, signing out every session.
+- Setup, reset, enrolment and pending tokens share one table; the setup token table is migrated into it.
+
 ## Unreleased — alerts (`mvp-to-production`)
 
 - One generic JSON webhook (Settings → Alerts), sealed, with a test button and optional HMAC signing. It covers failing

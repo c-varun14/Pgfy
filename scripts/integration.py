@@ -4,6 +4,7 @@
 Only resources bearing a fresh pgfy_test_* identity are created and removed.
 Run after scripts/build-image.py. Public ports are never opened by this fixture.
 """
+import base64
 import hashlib
 import hmac
 import http.cookiejar
@@ -695,6 +696,44 @@ while (my $c = $s->accept) { my ($len, $sig, $ts) = (0, "", "");
             next_image = os.environ.get("PGFY_TEST_NEXT_IMAGE")
             if next_image:
                 update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed)
+            # --- Second factor through the SSH-issued reset (tunnel mode gets one only this way) ---
+            def totp(key, at=None):
+                secret = base64.b32decode(key.replace(" ", "") + "=" * (-len(key.replace(" ", "")) % 8))
+                counter = int(at if at is not None else time.time()) // 30
+                digest = hmac.new(secret, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+                offset = digest[-1] & 0x0F
+                return "%06d" % ((int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF) % 1_000_000)
+            def next_step():
+                time.sleep(30 - time.time() % 30 + 1)  # a code is accepted once; wait for a fresh one
+            reset_token = compose("exec", "-T", "application", "pgfy", "reset-admin").stdout.strip()
+            assert len(reset_token) == 43 and reset_token not in compose("logs", "--no-color", "application").stdout
+            new_password = "a different integration passphrase"
+            code, enrol = request("/api/v1/auth/reset", {"token": reset_token, "password": new_password})
+            assert code == 200 and enrol["next"] == "enrol" and len(enrol["key"].replace(" ", "")) == 32, (code, enrol)
+            assert request("/api/v1/auth/login", {"email": "admin@example.com", "password": password})[1].get("csrf_token"), "the old password must work until the reset is confirmed"
+            earlier_session = [c for c in jar if c.name == "pgfy_tunnel_session"][0]
+            code, confirmed = request("/api/v1/auth/enrol/confirm", {"code": totp(enrol["key"])})
+            assert code == 200 and confirmed["csrf_token"], (code, confirmed)
+            assert request("/api/v1/auth/login", {"email": "admin@example.com", "password": password})[0] == 401, "the old password survived the reset"
+            replay = urllib.request.Request(cfg["origin"] + "/api/v1/auth/session", headers={"Cookie": f"pgfy_tunnel_session={earlier_session.value}"})
+            try:
+                urllib.request.build_opener(urllib.request.ProxyHandler({})).open(replay, timeout=10)
+                raise AssertionError("a session from before the reset still works")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401
+            next_step()
+            jar.clear()  # start signed out, as a new browser would
+            code, step = request("/api/v1/auth/login", {"email": "admin@example.com", "password": new_password})
+            assert code == 200 and step == {"next": "code", "server_time": step["server_time"]}, (code, step)
+            assert request("/api/v1/projects")[0] == 401, "a session existed before the code"
+            assert request("/api/v1/auth/code", {"code": totp(enrol["key"], time.time() - 3600)})[0] == 401, "an hour-old code was accepted"
+            code, session = request("/api/v1/auth/code", {"code": totp(enrol["key"])})
+            assert code == 200 and request("/api/v1/projects")[0] == 200, (code, session)
+            deadline = time.monotonic() + 90
+            while not any(d["kind"] == "admin_reset" for d in deliveries()):
+                assert time.monotonic() < deadline, "the reset was not alerted"
+                time.sleep(2)
+            passed("an SSH-issued reset enrols a second factor; the old password stops working; sign-in then needs a code; the reset is alerted")
             evidence["container_stats"] = compose("stats", "--no-stream", "--format", "json").stdout
             evidence["seconds"] = round(time.monotonic() - started, 2)
             evidence["volume_identities"] = volumes_before

@@ -88,6 +88,7 @@ Use the installed wrapper, replacing the path if you supplied `--dir`:
 ```sh
 sudo /opt/firstcommit/pgfyctl diagnostics
 sudo /opt/firstcommit/pgfyctl setup-token
+sudo /opt/firstcommit/pgfyctl reset-admin
 sudo /opt/firstcommit/pgfyctl hostname new-admin.example.com
 sudo /opt/firstcommit/pgfyctl rollback-hostname
 sudo /opt/firstcommit/pgfyctl tunnel
@@ -104,7 +105,29 @@ break-glass steps are in the [host runbook](host-runbook.md).
 
 `sync-db-cert` copies the certificate Caddy obtained for the dashboard hostname into PostgreSQL (validated, key permissions fixed, previous pair kept), reloads, and confirms a new TLS handshake presents it. The installer runs it once and installs a daily `pgfy-cert.timer` for renewals (also when switching to HTTPS with `pgfyctl hostname`; switching to tunnel mode stops it). Every attempt's outcome is recorded in `config/cert-sync.json`, and Settings shows the certificate's expiry. Until it has succeeded, PostgreSQL serves a self-signed placeholder and the dashboard says so.
 
-Token replacement works only before administrator creation and after the previous token expires. Losing an unexpired token requires waiting for expiry. Installer reruns never issue a replacement automatically. There is no public registration-reopening or password-reset endpoint.
+### Signing in and the second factor
+
+With a public hostname (HTTPS mode) the administrator always has a second factor: an authenticator app (1Password,
+Google Authenticator, Aegis and so on) enrolled by typing a key — there is no QR code. Setup takes the setup token,
+email and password, then shows the key; the administrator exists only once a code from the app confirms it. Signing in
+is the password, then a 6-digit code. An administrator created before this release enrols a factor at the next
+sign-in over HTTPS. In tunnel mode the password alone is enough until a factor exists (SSH is the other factor); a
+factor is added in tunnel mode through `pgfyctl reset-admin`, and once it exists a code is required in both modes,
+also after `pgfyctl tunnel`.
+
+Codes are accepted once and within one 30-second step of the server clock, so keep the host clock synchronised (the
+dashboard and alerts warn when it is not). Five wrong codes in a row lock code entry for a minute, doubling to an hour
+while wrong codes continue; ten in a row send an alert. None of this blocks the SSH reset.
+
+Lost the authenticator or the password: on the server run `sudo pgfyctl reset-admin`. It prints a one-use token valid
+for 30 minutes (only its hash is stored); on the sign-in page choose "Reset access", enter the token and a new
+password, and enrol the new key. Until a code confirms it nothing changes — the old password and factor keep working,
+so an abandoned reset cannot lock you out. Confirming replaces the password and factor, signs out every session,
+writes an audit row and sends an alert. Issuing a new reset token invalidates the previous one. Resets wait until an
+update finishes. If the dashboard certificate is broken, run `pgfyctl tunnel` first and reset over an SSH
+port-forward.
+
+Token replacement works only before administrator creation and after the previous token expires. Losing an unexpired token requires waiting for expiry. Installer reruns never issue a replacement automatically. There is no public registration-reopening endpoint, and a password reset needs a token issued over SSH.
 
 Hostname changes validate the hostname, DNS, Caddy configuration, routing, and HTTPS. They save the previous access configuration and restore it on failure. An interruption can be recovered with `rollback-hostname`. Changes briefly restart the application and Caddy and require signing in again. A rollback restores configuration; it cannot repair DNS or an expired certificate for the former hostname.
 
