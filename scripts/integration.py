@@ -217,7 +217,7 @@ def main():
             minio_secret = secrets.token_hex(16)
             minio_name = project.replace("_", "-") + "-minio"  # S3 clients need a valid hostname
             (directory / "minio/pgfy-backups").mkdir()
-            run(["docker", "run", "-d", "--name", minio_name, "--network", project + "_proxy", "-e", "MINIO_ROOT_USER=pgfytest", "-e", "MINIO_ROOT_PASSWORD=" + minio_secret, "-v", f"{directory}/minio:/data", images["minio_test"], "server", "/data"])
+            run(["docker", "run", "-d", "--name", minio_name, "--network", project + "_proxy", "-e", "MINIO_ROOT_USER=pgfytest", "-e", "MINIO_ROOT_PASSWORD=" + minio_secret, "-v", f"{directory}/minio:/data", os.environ.get("PGFY_TEST_MINIO_IMAGE", images["minio_test"]), "server", "/data"])
             time.sleep(3)
             storage = {"endpoint": f"http://{minio_name}:9000", "region": "us-east-1", "bucket": "pgfy-backups", "prefix": "pgfy/test", "access_key": "pgfytest", "secret_key": minio_secret, "session_token": "", "path_style": True, "private_endpoint": True, "bucket_protection": "versioning"}
             # A plaintext endpoint is only allowed for a private address, and a bucket
