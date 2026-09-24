@@ -65,7 +65,7 @@ export type HostStatus = {
   written_at: number;
   disks: HostDisk[];
   ntp_synchronized: boolean | null;
-  certificate: { state: string; issuer?: string; expires_at: number | null; expiring: boolean; last_sync?: { at: string; ok: boolean; message: string } };
+  certificate: { state: string; issuer?: string; expires_at: number | null; expiring: boolean; expired?: boolean; last_sync?: { at: string; ok: boolean; message: string } };
 };
 export type Status = {
   ready: boolean;

@@ -66,10 +66,10 @@ const DISK_NAMES: Record<string, string> = { postgres: "PostgreSQL data", worksp
 function HostCard({ host }: { host?: HostStatus }) {
   if (!host) return null;
   const clock = host.ntp_synchronized === true ? "Synchronised" : host.ntp_synchronized === false ? "Not synchronised" : "Unknown";
-  const tone = host.state !== "ok" || host.disks.some((d) => d.low) || host.ntp_synchronized === false ? "bad" : "good";
+  const tone = host.state !== "ok" || host.disks.some((d) => d.low || d.error) || host.ntp_synchronized === false ? "bad" : "good";
   return <Card><CardHeader title="Host" aside={<Pill tone={tone}>{host.state === "unknown" ? "No report" : host.state === "stale" ? "Report stale" : tone === "good" ? "Healthy" : "Needs attention"}</Pill>} />
-    {host.state === "unknown" && <Banner tone="warn">The host has not reported disk and clock status. Run <code>sudo pgfyctl diagnostics</code> on the server.</Banner>}
-    {host.state === "stale" && <Banner tone="warn">The last host report is from {relativeTime(host.written_at)}; the status timer may have stopped. Run <code>sudo pgfyctl diagnostics</code>.</Banner>}
+    {host.state === "unknown" && <Banner tone="warn">The host has not reported disk and clock status. On the server, check <code>systemctl status pgfy-host-status.timer</code> and run <code>sudo pgfyctl diagnostics</code>.</Banner>}
+    {host.state === "stale" && <Banner tone="warn">The last host report is from {relativeTime(host.written_at)}; the status timer may have stopped. Check <code>systemctl status pgfy-host-status.timer</code> on the server.</Banner>}
     {host.state !== "unknown" && <DetailsList items={[
       ...host.disks.map((d) => ({ label: DISK_NAMES[d.name] || d.name, value: d.error ? "Could not be measured" : <span>{Math.round(d.free_percent)}% free · {formatBytes(d.free_bytes ?? null)} of {formatBytes(d.total_bytes ?? null)}{d.low && <> <Pill tone="bad">Low</Pill></>}</span> })),
       { label: "Clock", value: <span>{clock}{host.ntp_synchronized === false && <> <Pill tone="bad">Sign-in codes and certificates depend on it</Pill></>}</span> },
@@ -90,10 +90,11 @@ export function SettingsPage({ settings, status }: { settings: Settings; status:
       { label: "PostgreSQL version", value: status?.postgres.version || "Connection unavailable" },
     ]} /></Card>
     <Card><CardHeader title="Database endpoint" aside={access && <Pill tone={access.mode === "direct" ? certificate?.state === "trusted" ? "good" : "wait" : "neutral"}>{access.mode === "direct" ? certificate?.state === "trusted" ? "Certificate trusted" : "Certificate pending" : "Tunnel only"}</Pill>} />
-      {access ? <><DetailsList items={[{ label: "Address", value: <code>{access.host}:{access.port}</code>, copy: `${access.host}:${access.port}` }, { label: "Certificate", value: certificate?.state === "trusted" ? `Trusted${certificate.issuer ? ` · ${certificate.issuer}` : ""}` : certificate?.state === "placeholder" ? "Not issued yet" : "Status unavailable" }]} />
+      {access ? <><DetailsList items={[{ label: "Address", value: <code>{access.host}:{access.port}</code>, copy: `${access.host}:${access.port}` }, { label: "Certificate", value: access.mode === "tunnel" ? "Not used in tunnel mode" : certificate?.state === "trusted" ? `Trusted${certificate.issuer ? ` · ${certificate.issuer}` : ""}` : certificate?.state === "placeholder" ? "Not issued yet" : "Status unavailable" }]} />
         {access.mode === "direct" && hostCert?.expires_at && <p className={hostCert.expiring ? "caption warn-text" : "caption"}>Certificate expires {formatDate(hostCert.expires_at)} ({relativeTime(hostCert.expires_at)}). It serves both the dashboard and PostgreSQL, so an expired certificate stops every client using <code>verify-full</code>.</p>}
-        {access.mode === "direct" && hostCert?.expiring && <Banner tone="warn">The certificate expires within 14 days. Check that ports 80/443 reach Caddy, then run <code>sudo pgfyctl sync-db-cert</code>.</Banner>}
-        {access.mode === "direct" && hostCert?.last_sync && !hostCert.last_sync.ok && <Banner tone="warn">The last certificate delivery to PostgreSQL failed ({relativeTime(Date.parse(hostCert.last_sync.at) / 1000)}): {hostCert.last_sync.message}</Banner>}
+        {access.mode === "direct" && hostCert?.expired && <Banner tone="warn">The certificate has expired: clients verifying it cannot connect. Check that ports 80/443 reach Caddy, then run <code>sudo pgfyctl sync-db-cert</code>.</Banner>}
+        {access.mode === "direct" && hostCert?.expiring && !hostCert.expired && <Banner tone="warn">The certificate expires within 14 days. Check that ports 80/443 reach Caddy, then run <code>sudo pgfyctl sync-db-cert</code>.</Banner>}
+        {access.mode === "direct" && hostCert?.last_sync && !hostCert.last_sync.ok && <Banner tone="warn">The last certificate delivery to PostgreSQL failed{Number.isFinite(Date.parse(hostCert.last_sync.at)) ? ` (${relativeTime(Date.parse(hostCert.last_sync.at) / 1000)})` : ""}: {hostCert.last_sync.message}</Banner>}
         {access.mode === "direct" && certificate?.state !== "trusted" && <Banner tone="warn">Run <code>sudo pgfyctl sync-db-cert</code> on the server to issue the database certificate.</Banner>}
         <p className="caption">{access.mode === "direct" ? "Allow TCP port 5432 in your provider firewall for the app servers that connect." : "Open an SSH tunnel before connecting to PostgreSQL."}</p></> : <p>Database access details are unavailable.</p>}
     </Card>

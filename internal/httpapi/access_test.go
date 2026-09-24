@@ -108,3 +108,12 @@ func TestAccessChangesAreAuditedWithoutSecrets(t *testing.T) {
 		t.Fatal("rotation without PostgreSQL management", r.Code)
 	}
 }
+
+func TestStatusReportsTheHost(t *testing.T) {
+	f := newFixture(t)
+	cookie, _ := f.setup(t)
+	r := f.request("GET", "/api/v1/system/status", "", cookie, "", "")
+	if r.Code != 200 || !strings.Contains(r.Body.String(), `"host":{"state":"unknown"`) {
+		t.Fatal(r.Code, r.Body.String())
+	}
+}

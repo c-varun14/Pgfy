@@ -568,6 +568,7 @@ def install(args):
     installation.compose("restart", "application", timeout=60)
     installation.verify()
     converge_host(root, mode)
+    print("Enabling unattended security updates…", flush=True)
     unattended_upgrades()
     host_status(installation)
     state["stage"] = "installed"
@@ -620,9 +621,9 @@ def change_access(installation, mode, hostname="", rollback=False):
         atomic(root / "config/caddy/Caddyfile", saved_caddy, 0o644)
         atomic(root / "compose.env", compose_env(root, installation.state, old), 0o600)
         installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=120, check=False)
-        converge_host(root, old["mode"])
+        refresh_timers(root, old["mode"])
         raise InstallError("Access change failed; previous configuration restored. Sign in again. If the host was interrupted, run pgfyctl rollback-hostname.")
-    converge_host(root, new["mode"])
+    refresh_timers(root, new["mode"])
     print(f"Access verified: {new['origin']}. Previous sessions are invalid; sign in again.")
     if new["mode"] == "tunnel":
         print("Loopback access only. Use ssh -L 8080:127.0.0.1:8080 user@server.")
@@ -648,6 +649,9 @@ def sync_db_cert(installation, fatal=True):
             raise
         print(f"Database certificate not synced yet: {error} The self-signed placeholder remains; clients cannot verify it until sync succeeds.")
         return
+    except BaseException:
+        record_cert_sync(installation.root, False, "Certificate delivery stopped unexpectedly; run pgfyctl sync-db-cert and pgfyctl diagnostics.")
+        raise
     record_cert_sync(installation.root, True, "")
 
 def record_cert_sync(root, ok, message):
@@ -711,13 +715,20 @@ class SimpleResult:
     def __init__(self, returncode, stdout):
         self.returncode, self.stdout = returncode, stdout
 
+def refresh_timers(root, mode):
+    """converge_host for paths where the access change itself is what must be reported."""
+    try:
+        converge_host(root, mode)
+    except (InstallError, OSError) as error:
+        print(f"Warning: host timers could not be updated ({error}); rerun the installer or pgfyctl hostname later.")
+
 def converge_host(root, mode):
     """Host timers for this release: status every five minutes in both modes, certificate delivery only with
     a public hostname. Idempotent; switching to tunnel mode stops the certificate timer."""
     units = {
         "/etc/systemd/system/pgfy-host-status.service": f"[Unit]\nDescription=Record Pgfy host status (disk, clock)\n\n[Service]\nType=oneshot\nTimeoutStartSec=120\nExecStart={root}/pgfyctl host-status\n",
         "/etc/systemd/system/pgfy-host-status.timer": "[Unit]\nDescription=Pgfy host status every five minutes\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=5min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n",
-        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nTimeoutStartSec=120\nExecStart={root}/pgfyctl sync-db-cert\n",
+        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nTimeoutStartSec=900\nExecStart={root}/pgfyctl sync-db-cert\n",
         "/etc/systemd/system/pgfy-cert.timer": "[Unit]\nDescription=Daily Pgfy database certificate sync\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
     }
     for path, content in units.items():
@@ -726,7 +737,7 @@ def converge_host(root, mode):
     run(["systemctl", "enable", "--now", "pgfy-host-status.timer"], check=False)
     run(["systemctl", "enable" if mode == "https" else "disable", "--now", "pgfy-cert.timer"], check=False)
 
-def host_status(installation):
+def host_status(installation, write=True):
     """Disk and clock facts the dashboard cannot see from its container. Runs without the installation lock:
     it only reads files that are replaced atomically and writes its own."""
     root = installation.root
@@ -734,7 +745,7 @@ def host_status(installation):
     def probe(args):
         # A missing or hung tool is an unknown, never a crash of the five-minute timer.
         try:
-            return run(args, check=False, timeout=60)
+            return run(args, check=False, timeout=20)
         except InstallError:
             return SimpleResult(1, "")
     mountpoint = probe(["docker", "volume", "inspect", installation.state["volume_prefix"] + "_postgres", "--format", "{{.Mountpoint}}"])
@@ -753,7 +764,8 @@ def host_status(installation):
     ntp = probe(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
     synchronized = {"yes": True, "no": False}.get(ntp.stdout.strip()) if ntp.returncode == 0 else None
     status = {"version": 1, "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "disks": disks, "ntp": {"synchronized": synchronized}}
-    json_write(root / "config/host-status.json", status, 0o644)
+    if write:
+        json_write(root / "config/host-status.json", status, 0o644)
     return status
 
 def unattended_upgrades():
@@ -762,12 +774,12 @@ def unattended_upgrades():
     try:
         # Prints UU='1', or nothing when unset.
         current = run(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"], check=False).stdout
-        value = shlex.split(current.strip().partition("=")[2])[0] if "=" in current else ""
-        if value == "1":
-            return "enabled"
+        value = (shlex.split(current.strip().partition("=")[2]) or [""])[0] if "=" in current else ""
         if value == "0":
             print("Warning: unattended security updates are explicitly disabled on this host; see the host runbook.")
             return "disabled by operator"
+        if value:
+            return "enabled"
         installed = run(["dpkg-query", "-W", "-f=${Status}", "unattended-upgrades"], check=False)
         if "install ok installed" not in installed.stdout:
             for command in (["update"], ["install", "-y", "unattended-upgrades"]):
@@ -775,7 +787,7 @@ def unattended_upgrades():
         if not Path("/etc/apt/apt.conf.d/20auto-upgrades").exists():
             atomic("/etc/apt/apt.conf.d/20auto-upgrades", 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n', 0o644)
         return "enabled"
-    except (InstallError, OSError, subprocess.SubprocessError):
+    except (InstallError, OSError, ValueError, subprocess.SubprocessError):
         print("Warning: unattended security updates could not be enabled; enable them by hand (see the host runbook).")
         return "unknown"
 
@@ -1063,8 +1075,17 @@ def diagnostics(installation):
     print("Maintenance (backups and changes paused):", maintenance + (" — run pgfyctl maintenance off if no update is running" if maintenance == "on" else ""))
     if (installation.root / "update-rollback").exists():
         print("An unfinished update left update-rollback/. Run pgfyctl rollback-update.")
+    def probe(args):
+        try:
+            return run(args, check=False, timeout=20).stdout.strip()
+        except InstallError:
+            return ""
     try:
-        status = host_status(installation)
+        # Diagnostics measure without writing: a dead timer must stay visible as a stale report.
+        previous = installation.root / "config/host-status.json"
+        written = read_json(previous).get("written_at", "never") if previous.exists() else "never"
+        print(f"Host status last written by the timer: {written}; pgfy-host-status.timer {probe(['systemctl', 'is-active', 'pgfy-host-status.timer']) or 'unknown'}")
+        status = host_status(installation, write=False)
         for disk in status["disks"]:
             if "error" in disk:
                 print(f"Disk {disk['name']}: could not be measured")
@@ -1073,8 +1094,8 @@ def diagnostics(installation):
         print("Clock synchronised:", {True: "yes", False: "NO — TOTP codes and certificates depend on it", None: "unknown"}[status["ntp"]["synchronized"]])
     except (InstallError, OSError) as error:
         print("Host status unavailable:", error)
-    upgrades = run(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"], check=False).stdout.strip() or "unset"
-    timer = run(["systemctl", "is-enabled", "apt-daily-upgrade.timer"], check=False).stdout.strip() or "unknown"
+    upgrades = probe(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"]) or "unset"
+    timer = probe(["systemctl", "is-enabled", "apt-daily-upgrade.timer"]) or "unknown"
     print(f"Unattended upgrades: {upgrades}; apt-daily-upgrade.timer {timer}")
     print("No secrets or raw logs are included. Bootstrap credentials stay in restricted host files.")
 
