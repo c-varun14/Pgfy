@@ -433,3 +433,20 @@ func (m *Management) Reload(ctx context.Context) (time.Time, error) {
 		}
 	}
 }
+
+// NearLimit reports whether use has reached 80% of a limit; a limit of 0 or
+// less (unlimited) never does.
+func NearLimit(used, limit int64) bool { return limit > 0 && used*5 >= limit*4 }
+
+// Warnings is the one definition of connection pressure, shared by the
+// dashboard and the alerts: project connections at 80% of what ordinary roles
+// may open, and any role at 80% of its own limit.
+func (b Budget) Warnings() (global bool, roles []string) {
+	global = NearLimit(b.ProjectsUsed, b.Available)
+	for _, u := range append(append([]RoleUse{}, b.Roles...), b.System...) {
+		if NearLimit(u.Connections, u.Limit) {
+			roles = append(roles, u.Role)
+		}
+	}
+	return global, roles
+}

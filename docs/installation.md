@@ -173,6 +173,59 @@ different major version or base image is refused. An update is not a way to repa
 
 The first release that includes `update` is installed by the manual reinstall procedure; later ones use `update`.
 
+## Alerts
+
+Settings → Alerts takes one webhook URL. Pgfy checks every minute and posts JSON when:
+
+| Kind | When |
+| --- | --- |
+| `backup_failed` | A database's scheduled backup failed twice in a row (the first failure is retried after 15 minutes) |
+| `backup_stale` | A database's newest recoverable backup is older than 1.5 × the backup target interval |
+| `job_interrupted` | A backup or restore was interrupted by an application restart (one message per job) |
+| `postgres_unreachable` | The health check has failed continuously for five minutes |
+| `disk_low` | Free space is under 15% on the PostgreSQL volume, the backup workspace or `/` (one alert per disk) |
+| `host_report_stale` | The host stopped reporting disk and clock status, so those alerts cannot fire |
+| `ntp_unsynchronised` | The host clock is not NTP-synchronised |
+| `certificate_expiring`, `certificate_sync_failed` | HTTPS mode: the certificate expires within 14 days, or delivering it to PostgreSQL failed |
+| `connections` | Project connections reach 80% of what PostgreSQL accepts for them, or a role reaches 80% of its limit |
+| `manifest_only` | The bucket holds a manifest whose archive is missing |
+| `credential_rotated` | A database password was changed (one message per change) |
+
+Conditions are sent as `state: "firing"`, at most once every 24 hours per condition while they last, and
+`state: "resolved"` once they have stayed clear for ten minutes; one-shot events are sent as `state: "event"`. A
+condition that returns within 24 hours of its last firing message is not sent again until the 24 hours are up, so
+the receiver may believe it resolved for that time — the dashboard always shows what is active now. A condition
+Pgfy cannot check (for example connections while PostgreSQL is down) is never reported as resolved. Delivery is
+at-least-once: a crash between delivery and recording it can repeat a message. Nothing is sent during an update, and
+events older than 24 hours when delivery resumes are dropped.
+
+The body:
+
+```json
+{"version": 1, "kind": "backup_failed", "key": "backup_failed:prj_…", "state": "firing",
+ "summary": "Backups of shop are failing", "detail": "…", "installation_id": "…",
+ "dashboard": "https://pgfy.example.com", "at": "2026-09-24T12:00:00Z", "text": "[Pgfy] Alert: …"}
+```
+
+`text` makes Slack incoming webhooks work as they are; Discord accepts the same body at its webhook URL with `/slack`
+appended. With a signing secret, each request carries `X-Pgfy-Timestamp` (Unix seconds) and
+`X-Pgfy-Signature: sha256=<hex>`, an HMAC-SHA256 of `timestamp + "." + body`. Verify it, and reject old timestamps:
+
+```python
+import hashlib, hmac, time
+def verified(secret: bytes, timestamp: str, body: bytes, signature: str) -> bool:
+    expected = "sha256=" + hmac.new(secret, timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature) and abs(time.time() - int(timestamp)) < 300
+```
+
+The URL must use HTTPS and reach a public address. A receiver on this machine's network (another container, a LAN
+address, a Tailscale 100.64.0.0/10 address) needs "private endpoint", which also allows plain HTTP; link-local
+addresses such as a cloud metadata service are always refused, and redirects are not followed. The URL and secret are
+sealed like storage credentials; the dashboard and the audit trail only ever show the host.
+
+Whole-host failures cannot alert from the host itself: point an external uptime monitor at
+`https://<dashboard-host>/health/ready` (HTTPS mode).
+
 ## Failure handling
 
 - **Interrupted image pull:** correct connectivity and rerun the same release; existing state remains intact.

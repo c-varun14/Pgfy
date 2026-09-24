@@ -53,7 +53,8 @@ NTP-synchronised. Each certificate delivery (`pgfy-cert.timer`, daily, HTTPS mod
   `sudo pgfyctl sync-db-cert`. With shorter certificate lifetimes, a single missed daily sync can cross the 14-day line;
   treat a failed delivery as the earlier warning.
 
-Also point an external uptime monitor at `https://<dashboard-host>/health/ready` (HTTPS mode): it is the only thing that
+Alerts for these conditions go to the webhook set in Settings → Alerts (see [Alerts](installation.md#alerts)). Also
+point an external uptime monitor at `https://<dashboard-host>/health/ready` (HTTPS mode): it is the only thing that
 notices when the whole host is down.
 
 ## Break-glass access

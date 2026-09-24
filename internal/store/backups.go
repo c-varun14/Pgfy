@@ -502,3 +502,28 @@ func (s *Store) PruneJobs(ctx context.Context, before time.Time) (int64, error) 
 	}
 	return res.RowsAffected()
 }
+
+// LateProjects lists ready projects whose newest recoverable backup is older
+// than 1.5 times the target interval, or that have none although they have
+// been ready that long. The status field and the stale-backup alert share it.
+func (s *Store) LateProjects(ctx context.Context, target, installationID string, interval time.Duration, now time.Time) ([]Project, error) {
+	projects, e := s.Projects(ctx)
+	if e != nil {
+		return nil, e
+	}
+	newest, e := s.NewestRecoverable(ctx, target, installationID)
+	if e != nil {
+		return nil, e
+	}
+	deadline := now.Add(-3 * interval / 2).Unix()
+	late := []Project{}
+	for _, p := range projects {
+		if p.Stage != "ready" || p.Failed {
+			continue
+		}
+		if at, ok := newest[p.ID]; (!ok && p.ReadyAt < deadline) || (ok && at < deadline) {
+			late = append(late, p)
+		}
+	}
+	return late, nil
+}

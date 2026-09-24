@@ -33,6 +33,10 @@ All application endpoints use JSON under `/api/v1`. Responses containing authent
 | `GET /api/v1/jobs/{id}` | Session cookie | Job with `state`, `stage`, `error`, `result`, `elapsed_seconds` |
 | `GET /api/v1/recovery/backups` | Session cookie | `{state, databases, reconciled_at, installation_id, busy, restores}`; `state` is `ok`, `checking` (the bucket has not been read completely yet) or `storage_not_configured`. `?db=&before=&limit=` returns one database's next page |
 | `POST /api/v1/recovery/restores` | `{manifest_key, name}` + CSRF | 202 `{project, job}`; always a new project |
+| `GET /api/v1/settings/alerts` | Session cookie | `{configured, url, has_secret, private_endpoint}`; `url` is scheme and host only |
+| `PUT /api/v1/settings/alerts` | `{url, secret, private_endpoint}` + CSRF | Empty `url` turns alerts off; blank `secret`, or the masked URL sent back, keeps the stored value; 400 `invalid_webhook` for plain HTTP to a public receiver |
+| `POST /api/v1/settings/alerts/test` | `{}` + CSRF | `{ok, error?}` after delivering a test message |
+| `GET /api/v1/alerts` | Session cookie | `{conditions[], delivery: {last_ok_at, last_error}}`; active conditions first |
 | `GET /health/live` | — | 200 when the process is serving |
 | `GET /health/ready` | — | 200 `ready` or 503 `not_ready`; no component details |
 

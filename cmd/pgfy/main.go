@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/c-varun14/Pgfy/internal/alerts"
 	"github.com/c-varun14/Pgfy/internal/config"
 	"github.com/c-varun14/Pgfy/internal/hba"
 	"github.com/c-varun14/Pgfy/internal/hoststatus"
@@ -181,15 +182,45 @@ func run() error {
 			return errors.New("invalid trusted proxy CIDR")
 		}
 	}
-	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"),
-		HostPaths: hoststatus.Paths{Status: config.Env("PGFY_HOST_STATUS", "/etc/pgfy/host-status.json"), CertSync: config.Env("PGFY_CERT_SYNC", "/etc/pgfy/cert-sync.json"),
-			TLSState: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"), Certificate: config.Env("PGFY_TLS_CERT", "/etc/pgfy/postgres-tls/server.crt")}}
+	hostPaths := hoststatus.Paths{Status: config.Env("PGFY_HOST_STATUS", "/etc/pgfy/host-status.json"), CertSync: config.Env("PGFY_CERT_SYNC", "/etc/pgfy/cert-sync.json"),
+		TLSState: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"), Certificate: config.Env("PGFY_TLS_CERT", "/etc/pgfy/postgres-tls/server.crt")}
+	var alerter *alerts.Engine
+	if s != nil {
+		// Alerts run whenever metadata is readable, independent of PostgreSQL management:
+		// a source that needs it is simply not checked without it.
+		alerter = &alerts.Engine{Store: s, Vault: vault, InstallationID: cfg.ID, Dashboard: cfg.Origin, Mode: cfg.Mode, Version: version, HostPaths: hostPaths, Postgres: pg.Check}
+		if mgmt != nil {
+			alerter.Budget = mgmt.ConnectionBudget
+		}
+		if worker != nil {
+			alerter.Backups = func(ctx context.Context) (alerts.Backups, bool) {
+				settings, e := worker.StorageSettings(ctx)
+				if errors.Is(e, jobs.ErrStorageNotConfigured) {
+					return alerts.Backups{}, true
+				}
+				if e != nil {
+					return alerts.Backups{}, false
+				}
+				target := settings.Target()
+				state, e := s.StorageTarget(ctx, target)
+				policy, pe := s.BackupPolicy(ctx)
+				if e != nil || pe != nil || state.ReconciledAt == 0 {
+					return alerts.Backups{}, false
+				}
+				return alerts.Backups{Configured: true, Target: target, Interval: policy.Interval()}, true
+			}
+		}
+	}
+	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"), HostPaths: hostPaths, Alerts: alerter}
 	srv := http.Server{Addr: config.Env("PGFY_LISTEN", ":3000"), Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if provisioner != nil {
 		go provisioner.Run(ctx)
 		go worker.Run(ctx)
+	}
+	if alerter != nil {
+		go alerter.Run(ctx)
 	}
 	go func() {
 		<-ctx.Done()

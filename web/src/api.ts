@@ -67,6 +67,9 @@ export type HostStatus = {
   ntp_synchronized: boolean | null;
   certificate: { state: string; issuer?: string; expires_at: number | null; expiring: boolean; expired?: boolean; last_sync?: { at: string; ok: boolean; message: string } };
 };
+export type AlertSettings = { configured: boolean; url: string; has_secret: boolean; private_endpoint: boolean };
+export type AlertCondition = { key: string; kind: string; summary: string; detail: string; active: boolean; first_seen_at: number; last_fired_at: number; sent_state: string };
+export type Alerts = { conditions: AlertCondition[]; delivery: { last_ok_at: number; last_error: string } };
 export type Status = {
   ready: boolean;
   maintenance?: boolean;
