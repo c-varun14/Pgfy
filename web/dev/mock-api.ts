@@ -15,6 +15,16 @@ type MockProject = Record<string, unknown> & { id: string; name: string; stage: 
 const project = (id: string, name: string, stage: string, failed = false, offset = 86400): MockProject => ({ id, name, db_name: `app_${id.slice(4)}`, role_name: `app_${id.slice(4)}`, stage, failed, stage_error: failed ? "PostgreSQL stopped while the database was being created." : "", created_at: now() - offset, ready_at: stage === "ready" ? now() - offset + 8 : 0, size_bytes: stage === "ready" ? 48_340_992 : null, connections_now: name === "shop" ? [{ client_addr: "203.0.113.42", tls: true, application_name: "storefront", since: new Date().toISOString() }] : [], policy: { current_revision: 1, applied_revision: 1, state: "applied", last_error: "", addresses: ["0.0.0.0/0", "::/0"] }, open_to_internet: stage === "ready", rotation_pending: false, limits: { ...DEFAULT_LIMITS, revision: 1, applied_revision: 1 } });
 const DEFAULT_LIMITS = { statement_timeout_ms: 60000, idle_in_transaction_ms: 300000, temp_file_limit_kb: 1048576, lock_timeout_ms: 10000, connection_limit: 25 };
 let rotations = 0;
+/** The host report: ok (default), low-disk, expiring, stale or missing; tests switch it with PUT /__mock/host. */
+let hostScenario = process.env.VITE_MOCK_HOST || "ok";
+function hostStatus() {
+  const scenario = hostScenario;
+  if (scenario === "missing") return { state: "unknown", written_at: 0, disks: [], ntp_synchronized: null, certificate: { state: "trusted", expires_at: null, expiring: false } };
+  const disk = (name: string, freePercent: number) => ({ name, device: 2049, total_bytes: 80e9, free_bytes: 80e9 * freePercent / 100, free_percent: freePercent, low: freePercent < 15 });
+  const expires = now() + (scenario === "expiring" ? 9 : 62) * 86400;
+  return { state: scenario === "stale" ? "stale" : "ok", written_at: now() - (scenario === "stale" ? 3600 : 120), disks: [disk("postgres", scenario === "low-disk" ? 9 : 61), disk("workspace", scenario === "low-disk" ? 9 : 61), disk("root", scenario === "low-disk" ? 9 : 61)], ntp_synchronized: true,
+    certificate: { state: direct ? "trusted" : "not_used", issuer: "Let's Encrypt", expires_at: direct ? expires : null, expiring: direct && scenario === "expiring", last_sync: direct ? { at: new Date().toISOString(), ok: scenario !== "expiring", message: scenario === "expiring" ? "Caddy has not obtained a certificate for the dashboard hostname yet." : "" } : undefined } };
+}
 let projects = [project("prj_shop", "shop", "ready", false, 86400 * 23), project("prj_blog", "blog", "role_created", false, 15), project("prj_analytics", "analytics", "role_created", true, 86400 * 4)];
 const boot = Date.now();
 
@@ -66,12 +76,13 @@ function tick(job: MockJob) {
 export function mockApi(): Plugin {
   return { name: "pgfy-mock-api", configureServer(server) { server.middlewares.use("/api/v1", async (req, res) => {
     const path = (req.url || "/").split("?")[0]; const method = req.method || "GET";
+    if (path === "/__mock/host" && method === "PUT") { hostScenario = String((await body(req) as { scenario?: string }).scenario || "ok"); return send(res, 204); }
     if (path === "/setup" && method === "GET") return send(res, 200, { available: true });
     if ((path === "/setup" || path === "/auth/login") && method === "POST") { signedIn = true; return send(res, 204); }
     if (path === "/auth/logout" && method === "POST") { signedIn = false; return send(res, 204); }
     if (path === "/auth/session") return signedIn ? send(res, 200, { email: "admin@example.com", expires_at: now() + 86400, csrf_token: "mock-csrf", client_ip: "198.51.100.18" }) : failure(res, 401, "unauthorized", "Sign in to continue.");
     if (!signedIn) return failure(res, 401, "unauthorized", "Sign in to continue.");
-    if (path === "/system/status") return send(res, 200, { ready: true, maintenance: false, sqlite: { status: "available", version: "3.49" }, postgres: { status: "available", version: "17.6" }, versions: { application: "0.1.0", worker: "0.1.0" }, backups: storageConfigured ? "ok" : "not_configured", database_access: { mode: direct ? "direct" : "tunnel", host: direct ? "db.demo.pgfy.dev" : "127.0.0.1", port: 5432, certificate: { state: direct ? "trusted" : "placeholder", issuer: direct ? "Let's Encrypt" : "", not_after: "2026-12-31" } } });
+    if (path === "/system/status") return send(res, 200, { ready: true, maintenance: false, host: hostStatus(), sqlite: { status: "available", version: "3.49" }, postgres: { status: "available", version: "17.6" }, versions: { application: "0.1.0", worker: "0.1.0" }, backups: storageConfigured ? "ok" : "not_configured", database_access: { mode: direct ? "direct" : "tunnel", host: direct ? "db.demo.pgfy.dev" : "127.0.0.1", port: 5432, certificate: { state: direct ? "trusted" : "placeholder", issuer: direct ? "Let's Encrypt" : "", not_after: "2026-12-31" } } });
     if (path === "/settings") return send(res, 200, { id: "demo-installation", hostname: direct ? "demo.pgfy.dev" : "127.0.0.1", origin: direct ? "https://demo.pgfy.dev" : "http://127.0.0.1:8080", mode: direct ? "https" : "tunnel", release: "v0.1.0", caddy_version: "2.10.2", docker_version: "28.3.3", compose_version: "2.39.2" });
     if (path === "/settings/storage" && method === "GET") return send(res, 200, { configured: storageConfigured, settings: storage });
     if (path === "/settings/storage" && method === "PUT") {

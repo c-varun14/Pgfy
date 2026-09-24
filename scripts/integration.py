@@ -72,7 +72,7 @@ def update_and_rollback(directory, installation, application_image, next_image, 
     def project_ids():
         return sorted((p["id"], p["name"], p["stage"]) for p in request("/api/v1/projects")[1]["projects"])
     projects_before = project_ids()
-    original = {"DIGEST": host.DIGEST, "pull_images": host.pull_images, "run_converge": host.run_converge, "verify": host.Installation.verify}
+    original = {"DIGEST": host.DIGEST, "pull_images": host.pull_images, "run_converge": host.run_converge, "verify": host.Installation.verify, "converge_host": host.converge_host}
     verified = []
     def verify_then_fail_once(self, require_dependencies=True):
         original["verify"](self, require_dependencies)
@@ -83,6 +83,7 @@ def update_and_rollback(directory, installation, application_image, next_image, 
             raise host.InstallError("injected failure after the new release migrated")
     host.DIGEST = __import__("re").compile(r"[a-zA-Z0-9./:_-]+(@sha256:[a-f0-9]{64})?\Z")  # local images carry no registry digest
     host.pull_images = lambda images: None
+    host.converge_host = lambda root, mode: None  # systemd units under /etc are not the fixture's to write
     host.run_converge = lambda installation, bundle, lock_fd: host.converge_installation(installation)
     host.Installation.verify = verify_then_fail_once
     try:
@@ -113,7 +114,7 @@ def update_and_rollback(directory, installation, application_image, next_image, 
             assert request("/api/v1/projects", {"name": "after-update"}, session["csrf_token"])[0] == 202
             passed("pgfyctl update migrates, verifies, resumes backups and signs sessions out")
     finally:
-        host.DIGEST, host.pull_images, host.run_converge, host.Installation.verify = original["DIGEST"], original["pull_images"], original["run_converge"], original["verify"]
+        host.DIGEST, host.pull_images, host.run_converge, host.Installation.verify, host.converge_host = original["DIGEST"], original["pull_images"], original["run_converge"], original["verify"], original["converge_host"]
 
 def main():
     started = time.monotonic()
@@ -643,6 +644,15 @@ def main():
             for value in sensitive_values:
                 assert value not in logs
             passed("setup token, password, and database credentials absent from container logs")
+            code, status = request("/api/v1/system/status")
+            assert code == 200 and status["host"]["state"] == "unknown", status.get("host")
+            host.host_status(installation)
+            code, status = request("/api/v1/system/status")
+            reported = status["host"]
+            assert reported["state"] == "ok" and {d["name"] for d in reported["disks"]} == {"postgres", "workspace", "root"}, reported
+            assert all(d.get("error") or d["free_percent"] > 0 for d in reported["disks"]), reported
+            assert reported["certificate"]["state"] == "not_used", reported
+            passed("host status written by the host timer's command is read by the application")
             next_image = os.environ.get("PGFY_TEST_NEXT_IMAGE")
             if next_image:
                 update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed)

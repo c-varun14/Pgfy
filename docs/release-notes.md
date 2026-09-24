@@ -1,5 +1,17 @@
 # Release notes
 
+## Unreleased — host status and upkeep (`mvp-to-production`)
+
+- `pgfy-host-status.timer` records free disk (PostgreSQL volume, backup workspace, `/`) and clock synchronisation every
+  five minutes; Settings shows them, and says when the report is missing or stale.
+- The database certificate's expiry is read from the certificate PostgreSQL serves and shown in Settings, with a
+  warning within 14 days; every delivery attempt's outcome is recorded and a failed one is shown.
+- Switching to HTTPS with `pgfyctl hostname` now installs the certificate timer; switching to tunnel mode stops it.
+- The installer enables unattended security updates unless explicitly disabled, and holds the Docker packages it
+  installs.
+- A [host runbook](host-runbook.md): maintenance ownership, patch and reboot cadence with validation, break-glass
+  access, retiring a database, client acceptance of the backup target, and bucket protection per provider.
+
 ## Unreleased — access and capacity (`mvp-to-production`)
 
 - Databases whose policy admits any address show "Open to the internet" on their card and page. The default is

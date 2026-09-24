@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, type BackupPolicy, type ConnectionBudget, type RoleUse, type Settings, type Status } from "../api";
+import { api, type BackupPolicy, type ConnectionBudget, type HostStatus, type RoleUse, type Settings, type Status } from "../api";
+import { formatBytes, formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Banner } from "../components/ui/banner";
 import { Card, CardHeader } from "../components/ui/card";
@@ -60,9 +61,26 @@ function ConnectionsCard() {
   </Card>;
 }
 
+const DISK_NAMES: Record<string, string> = { postgres: "PostgreSQL data", workspace: "Backup workspace", root: "System disk" };
+/** Disk and clock as the host records them every five minutes. */
+function HostCard({ host }: { host?: HostStatus }) {
+  if (!host) return null;
+  const clock = host.ntp_synchronized === true ? "Synchronised" : host.ntp_synchronized === false ? "Not synchronised" : "Unknown";
+  const tone = host.state !== "ok" || host.disks.some((d) => d.low) || host.ntp_synchronized === false ? "bad" : "good";
+  return <Card><CardHeader title="Host" aside={<Pill tone={tone}>{host.state === "unknown" ? "No report" : host.state === "stale" ? "Report stale" : tone === "good" ? "Healthy" : "Needs attention"}</Pill>} />
+    {host.state === "unknown" && <Banner tone="warn">The host has not reported disk and clock status. Run <code>sudo pgfyctl diagnostics</code> on the server.</Banner>}
+    {host.state === "stale" && <Banner tone="warn">The last host report is from {relativeTime(host.written_at)}; the status timer may have stopped. Run <code>sudo pgfyctl diagnostics</code>.</Banner>}
+    {host.state !== "unknown" && <DetailsList items={[
+      ...host.disks.map((d) => ({ label: DISK_NAMES[d.name] || d.name, value: d.error ? "Could not be measured" : <span>{Math.round(d.free_percent)}% free · {formatBytes(d.free_bytes ?? null)} of {formatBytes(d.total_bytes ?? null)}{d.low && <> <Pill tone="bad">Low</Pill></>}</span> })),
+      { label: "Clock", value: <span>{clock}{host.ntp_synchronized === false && <> <Pill tone="bad">Sign-in codes and certificates depend on it</Pill></>}</span> },
+      { label: "Reported", value: <time title={formatDate(host.written_at)}>{relativeTime(host.written_at)}</time> },
+    ]} />}
+  </Card>;
+}
+
 function friendlyName(key: string) { return key === "application" ? "Pgfy" : key.replaceAll("_", " ").replace(/\b\w/g, (value) => value.toUpperCase()); }
 export function SettingsPage({ settings, status }: { settings: Settings; status: Status | null }) {
-  const access = status?.database_access; const certificate = access?.certificate; const { theme, setTheme } = useTheme();
+  const access = status?.database_access; const certificate = access?.certificate; const hostCert = status?.host?.certificate; const { theme, setTheme } = useTheme();
   const themeOptions: { value: ThemePreference; label: string }[] = [{ value: "light", label: "Light" }, { value: "dark", label: "Dark" }, { value: "system", label: "System" }];
   return <><PageHeader title="Settings" />
     <Card><CardHeader title="Server" /><DetailsList items={[
@@ -73,9 +91,13 @@ export function SettingsPage({ settings, status }: { settings: Settings; status:
     ]} /></Card>
     <Card><CardHeader title="Database endpoint" aside={access && <Pill tone={access.mode === "direct" ? certificate?.state === "trusted" ? "good" : "wait" : "neutral"}>{access.mode === "direct" ? certificate?.state === "trusted" ? "Certificate trusted" : "Certificate pending" : "Tunnel only"}</Pill>} />
       {access ? <><DetailsList items={[{ label: "Address", value: <code>{access.host}:{access.port}</code>, copy: `${access.host}:${access.port}` }, { label: "Certificate", value: certificate?.state === "trusted" ? `Trusted${certificate.issuer ? ` · ${certificate.issuer}` : ""}` : certificate?.state === "placeholder" ? "Not issued yet" : "Status unavailable" }]} />
+        {access.mode === "direct" && hostCert?.expires_at && <p className={hostCert.expiring ? "caption warn-text" : "caption"}>Certificate expires {formatDate(hostCert.expires_at)} ({relativeTime(hostCert.expires_at)}). It serves both the dashboard and PostgreSQL, so an expired certificate stops every client using <code>verify-full</code>.</p>}
+        {access.mode === "direct" && hostCert?.expiring && <Banner tone="warn">The certificate expires within 14 days. Check that ports 80/443 reach Caddy, then run <code>sudo pgfyctl sync-db-cert</code>.</Banner>}
+        {access.mode === "direct" && hostCert?.last_sync && !hostCert.last_sync.ok && <Banner tone="warn">The last certificate delivery to PostgreSQL failed ({relativeTime(Date.parse(hostCert.last_sync.at) / 1000)}): {hostCert.last_sync.message}</Banner>}
         {access.mode === "direct" && certificate?.state !== "trusted" && <Banner tone="warn">Run <code>sudo pgfyctl sync-db-cert</code> on the server to issue the database certificate.</Banner>}
         <p className="caption">{access.mode === "direct" ? "Allow TCP port 5432 in your provider firewall for the app servers that connect." : "Open an SSH tunnel before connecting to PostgreSQL."}</p></> : <p>Database access details are unavailable.</p>}
     </Card>
+    <HostCard host={status?.host} />
     <BackupsCard />
     <ConnectionsCard />
     <Card><CardHeader title="Appearance" /><SegmentedControl value={theme} options={themeOptions} onChange={setTheme} label="Theme" /></Card>

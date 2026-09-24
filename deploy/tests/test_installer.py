@@ -13,6 +13,12 @@ spec.loader.exec_module(installer)
 TEST_STATE = {"release": "v0.1.0", "volume_prefix": "test", "images": {"application": "a", "postgres": "p", "caddy": "c"}, "database_subnet": "172.20.240.0/24", "proxy_subnet": "172.20.241.0/24", "public_subnet": "172.20.242.0/24"}
 
 class InstallerTests(unittest.TestCase):
+    def setUp(self):
+        # Host timers are systemd units under /etc; never touch them from tests.
+        patcher = patch.object(installer, "converge_host")
+        self.converge_host = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_interrupted_pull_retry_keeps_installation_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -117,6 +123,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(current["origin"], old["origin"])
             self.assertNotEqual(current["generation"], old["generation"])
             self.assertEqual((root / "config/caddy/Caddyfile").read_text(), original_caddy)
+            # The certificate timer follows the mode actually in force after the restore.
+            self.converge_host.assert_called_with(root, "tunnel")
             self.assertEqual(json.loads((root / "access-rollback.json").read_text())["config"], old)
 
     def test_successful_host_recovery_does_not_require_database_readiness(self):
@@ -387,9 +395,11 @@ class ConvergeTests(unittest.TestCase):
         calls = []
         installation.compose = lambda *args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(returncode=0, stdout="")
         installation.wait_postgres = lambda: calls.append((("wait",), {}))
-        with patch.object(installer, "converge_steps") as steps:
+        installation.config = lambda: {"mode": "https"}
+        with patch.object(installer, "converge_steps") as steps, patch.object(installer, "converge_host") as host:
             installer.converge_installation(installation)
         steps.assert_called_once()
+        host.assert_called_once_with(installation.root, "https")
         up = [args for args, _ in calls if "up" in args]
         self.assertEqual(up, [("up", "-d", "--no-recreate", "postgres")])
         sql = [kwargs.get("input", "") for args, kwargs in calls if "exec" in args]
@@ -403,3 +413,90 @@ class ConvergeTests(unittest.TestCase):
         init = (Path(__file__).parents[1] / "postgres/init.sh").read_text()
         for line in installer.POSTGRES_CONVERGE_SQL.strip().splitlines():
             self.assertIn(line, init)
+
+
+class HostStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        installer.json_write(self.root / "state.json", TEST_STATE)
+        (self.root / "data/work").mkdir(parents=True)
+        (self.root / "config").mkdir()
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def host(self, volume, ntp):
+        def fake(args, **kwargs):
+            if args[:3] == ["docker", "volume", "inspect"]:
+                return SimpleNamespace(returncode=0 if volume else 1, stdout=volume or "")
+            if args[0] == "timedatectl":
+                return ntp
+            raise AssertionError(args)
+        return fake
+
+    def test_status_is_readable_by_the_app_and_never_invents_numbers(self):
+        with patch.object(installer, "run", self.host(str(self.root), SimpleNamespace(returncode=0, stdout="yes\n"))):
+            status = installer.host_status(installer.Installation(self.root))
+        path = self.root / "config/host-status.json"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        disks = {d["name"]: d for d in status["disks"]}
+        self.assertEqual(set(disks), {"postgres", "workspace", "root"})
+        self.assertGreater(disks["workspace"]["total_bytes"], 0)
+        self.assertIn("device", disks["postgres"])
+        self.assertIs(status["ntp"]["synchronized"], True)
+        with patch.object(installer, "run", self.host(None, SimpleNamespace(returncode=1, stdout=""))):
+            status = installer.host_status(installer.Installation(self.root))
+        disks = {d["name"]: d for d in status["disks"]}
+        self.assertEqual(disks["postgres"], {"name": "postgres", "error": "could not be measured"})
+        self.assertIsNone(status["ntp"]["synchronized"])
+        def missing(args, **kwargs):
+            raise installer.InstallError(f"{args[0]} failed or timed out")
+        with patch.object(installer, "run", missing):
+            status = installer.host_status(installer.Installation(self.root))
+        self.assertIsNone(status["ntp"]["synchronized"])
+
+    def test_host_status_runs_while_the_lock_is_held(self):
+        import fcntl
+        lock = self.root / "held.lock"
+        argv = ["pgfyctl", "--dir", str(self.root), "host-status"]
+        with patch.object(installer, "lock_path", lambda root: str(lock)), open(lock, "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(installer.sys, "argv", argv), patch.object(installer.os, "geteuid", return_value=0), \
+                    patch.object(installer, "run", self.host(str(self.root), SimpleNamespace(returncode=0, stdout="no"))):
+                installer.main()
+        self.assertFalse(installer.read_json(self.root / "config/host-status.json")["ntp"]["synchronized"])
+
+    def test_certificate_sync_outcomes_are_recorded_except_in_tunnel_mode(self):
+        installation = installer.Installation(self.root)
+        installer.json_write(self.root / "config/install.json", {"mode": "https", "hostname": "db.example.com"}, 0o644)
+        with patch.object(installer, "deliver_db_cert", side_effect=installer.InstallError("Caddy has not obtained a certificate")):
+            installer.sync_db_cert(installation, fatal=False)
+        record = installer.read_json(self.root / "config/cert-sync.json")
+        self.assertEqual((record["ok"], record["message"]), (False, "Caddy has not obtained a certificate"))
+        self.assertEqual((self.root / "config/cert-sync.json").stat().st_mode & 0o777, 0o644)
+        with patch.object(installer, "deliver_db_cert"):
+            installer.sync_db_cert(installation)
+        self.assertTrue(installer.read_json(self.root / "config/cert-sync.json")["ok"])
+        (self.root / "config/cert-sync.json").unlink()
+        installer.json_write(self.root / "config/install.json", {"mode": "tunnel", "hostname": ""}, 0o644)
+        with self.assertRaises(installer.InstallError):
+            installer.sync_db_cert(installation)
+        self.assertFalse((self.root / "config/cert-sync.json").exists())
+
+    def test_unattended_upgrades_respect_an_explicit_choice(self):
+        outputs = {"UU='1'\n": "enabled", "UU='0'\n": "disabled by operator"}
+        for printed, expected in outputs.items():
+            with patch.object(installer, "run", return_value=SimpleNamespace(returncode=0, stdout=printed)), patch.object(installer, "atomic") as write, patch.object(installer.subprocess, "run") as apt:
+                self.assertEqual(installer.unattended_upgrades(), expected)
+                write.assert_not_called()
+                apt.assert_not_called()
+
+    def test_timers_follow_the_access_mode(self):
+        written = {}
+        with patch.object(installer, "atomic", lambda path, data, mode=0o600, uid=None, gid=None: written.__setitem__(path, data)), patch.object(installer, "run") as run:
+            installer.converge_host(self.root, "tunnel")
+        self.assertIn(f"ExecStart={self.root}/pgfyctl host-status", written["/etc/systemd/system/pgfy-host-status.service"])
+        commands = [c.args[0] for c in run.call_args_list]
+        self.assertIn(["systemctl", "enable", "--now", "pgfy-host-status.timer"], commands)
+        self.assertIn(["systemctl", "disable", "--now", "pgfy-cert.timer"], commands)
