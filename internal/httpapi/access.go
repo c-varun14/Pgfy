@@ -44,6 +44,10 @@ func (s *Server) putLimits(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); !ok {
 		return
 	}
+	if s.Provisioner == nil {
+		failure(w, 503, "postgres_unavailable", "Project provisioning is unavailable on this installation. Run host diagnostics.")
+		return
+	}
 	p, ok := s.project(w, r)
 	if !ok {
 		return
@@ -69,7 +73,7 @@ func (s *Server) putLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(w, r, "limits.update", p.ID, in.Limits)
-	if p.Stage == "ready" && s.Provisioner != nil {
+	if p.Stage == "ready" {
 		s.Provisioner.SyncLimits(r.Context())
 		if current, e := s.Store.ProjectLimits(r.Context(), p.ID); e == nil {
 			limits = current
@@ -92,7 +96,8 @@ func (s *Server) rotateCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := contextWithTimeout(r, 30*time.Second)
 	defer cancel()
-	if _, e := s.Provisioner.Rotate(ctx, p, s.auditEntry(w, "credentials.rotate", p.ID, nil)); e != nil {
+	password, e := s.Provisioner.Rotate(ctx, p, s.auditEntry(w, "credentials.rotate", p.ID, nil))
+	if e != nil {
 		if errors.Is(e, provision.ErrRotationIncomplete) {
 			failure(w, 502, "rotation_incomplete", "PostgreSQL did not confirm the new password yet. It will be finished automatically; the new password is shown once it is active.")
 			return
@@ -100,12 +105,9 @@ func (s *Server) rotateCredentials(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metadata_unavailable", "The password change could not be recorded; nothing changed.")
 		return
 	}
-	c, e := s.projectCredentials(r, p)
-	if e != nil {
-		failure(w, 503, "metadata_unavailable", "The password changed but could not be read back. Reveal it from the Connect tab.")
-		return
-	}
-	write(w, 200, map[string]any{"credentials": c, "rotated_at": s.Now().Unix()})
+	// Built from the password this request set, never read back: a later
+	// rotation may already be replacing it.
+	write(w, 200, map[string]any{"credentials": s.connectionDetails(p, password), "rotated_at": s.Now().Unix()})
 }
 
 func (s *Server) connectionBudget(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +146,7 @@ func (s *Server) connectionBudget(w http.ResponseWriter, r *http.Request) {
 		"max_connections": b.MaxConnections, "superuser_reserved": b.SuperuserReserved, "reserved": b.Reserved,
 		"available": b.Available, "projects_used": b.ProjectsUsed, "projects_limit": b.ProjectsLimit, "other_used": b.OtherUsed,
 		// Project roles compete for the ordinary slots; the system roles can use the reserved ones.
-		"warning":       b.Available > 0 && (b.ProjectsUsed+b.OtherUsed)*5 >= b.Available*4,
+		"warning":       b.Available > 0 && b.ProjectsUsed*5 >= b.Available*4,
 		"overcommitted": b.ProjectsLimit > b.Available,
 		"roles":         view(b.Roles),
 		"system":        view(b.System),

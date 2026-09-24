@@ -28,6 +28,7 @@ type Roles interface {
 	EnsureDatabase(ctx context.Context, name, owner string) error
 	ApplyLimits(ctx context.Context, role string, settings map[string]string, connectionLimit int64) error
 	RoleStates(ctx context.Context) (map[string]postgres.RoleState, error)
+	ResetDatabaseLimits(ctx context.Context, role, database string, keys []string) error
 	SetPassword(ctx context.Context, role, password string) error
 	TerminateSessions(ctx context.Context, database, role string) error
 }
@@ -39,7 +40,8 @@ type Provisioner struct {
 	HBA   *hba.Manager
 	kick  chan struct{}
 
-	locks sync.Map // project ID → *sync.Mutex guarding every rotation step
+	locks  sync.Map   // project ID → *sync.Mutex guarding every rotation step
+	limits sync.Mutex // one limits sync at a time, so an older revision never lands after a newer one
 }
 
 func New(s *store.Store, v *security.Vault, pg Roles, h *hba.Manager) *Provisioner {
@@ -256,8 +258,14 @@ func (p *Provisioner) applyLimits(ctx context.Context, projectID, role string, l
 // settings a project could reset on itself. Only the limit keys are compared,
 // so the write freeze and anything else on the role are left alone.
 func (p *Provisioner) SyncLimits(ctx context.Context) {
+	p.limits.Lock()
+	defer p.limits.Unlock()
 	projects, e := p.Store.ReadyProjectLimits(ctx)
-	if e != nil || len(projects) == 0 {
+	if e != nil {
+		slog.Warn("role limits could not be listed", "reason", e.Error())
+		return
+	}
+	if len(projects) == 0 {
 		return
 	}
 	states, e := p.PG.RoleStates(ctx)
@@ -271,6 +279,17 @@ func (p *Provisioner) SyncLimits(ctx context.Context) {
 			continue
 		}
 		want := postgres.LimitSettings(project.StatementTimeoutMS, project.IdleInTransactionMS, project.TempFileLimitKB, project.LockTimeoutMS)
+		var overrides []string
+		for key := range want {
+			if _, set := state.DatabaseSettings[key]; set {
+				overrides = append(overrides, key)
+			}
+		}
+		if len(overrides) > 0 {
+			if e := p.PG.ResetDatabaseLimits(ctx, project.Role, project.Database, overrides); e != nil {
+				slog.Warn("per-database overrides not removed", "project", project.ProjectID, "reason", e.Error())
+			}
+		}
 		drifted := state.ConnectionLimit != project.ConnectionLimit
 		for key, value := range want {
 			if state.Settings[key] != value {
@@ -285,6 +304,7 @@ func (p *Provisioner) SyncLimits(ctx context.Context) {
 		}
 		if e := p.applyLimits(ctx, project.ProjectID, project.Role, project.ProjectLimits); e != nil {
 			slog.Warn("role limits not applied", "project", project.ProjectID, "reason", e.Error())
+			_ = p.Store.LimitsFailed(ctx, project.ProjectID, "PostgreSQL did not accept the limits. Run pgfyctl diagnostics; they are retried automatically.")
 		}
 	}
 }

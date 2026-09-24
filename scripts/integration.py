@@ -326,6 +326,8 @@ def main():
                     if sql(f"SELECT count(*) FROM pg_stat_activity WHERE usename='{blog_role}';") != "0":
                         break
                     time.sleep(1)
+                else:
+                    raise AssertionError("the session holding the old password never connected")
                 code, rotated = request(f"/api/v1/projects/{blog}/credentials/rotate", {}, session["csrf_token"])
                 assert code == 200 and rotated["credentials"]["password"] != projects["Blog"]["credentials"]["password"], (code, rotated)
                 assert holder.wait(timeout=30) != 0, "the session using the old password survived the rotation"

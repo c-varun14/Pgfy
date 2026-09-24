@@ -47,7 +47,7 @@ export function DatabasePage({ id, session, tab, navigate }: { id: string; sessi
     </Dialog>
     {!ready ? <Provisioning project={project} onRetry={load} /> : <><Tabs value={activeTab} options={tabs} onChange={(next) => navigate(`/projects/${id}?tab=${next}`)} label="Database sections" /><div className="tab-panel page-enter" role="tabpanel" key={activeTab}>
       {activeTab === "overview" && <OverviewTab project={project} host={access.host} sslmode={sslmode} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} onTab={(next) => navigate(`/projects/${id}?tab=${next}`)} />}
-      {activeTab === "connect" && <ConnectTab project={project} access={access} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} onRotated={(next) => { setCredentials(next); setRevealed(true); void load(); }} />}
+      {activeTab === "connect" && <ConnectTab project={project} access={access} credentials={credentials} revealed={revealed} credentialBusy={credentialBusy} credentialError={credentialError} onReveal={() => void reveal()} onHide={() => setRevealed(false)} onCopy={() => void copyUrl()} onRotated={(next) => { setCredentials(next); setRevealed(true); void load(); }} onChange={() => void load()} />}
       {activeTab === "backups" && <BackupsTab project={project} navigate={navigate} />}
       {activeTab === "access" && <AccessTab project={project} session={session} onChange={load} />}
     </div></>}

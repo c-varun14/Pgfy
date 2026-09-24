@@ -34,16 +34,19 @@ const FIELDS: Field[] = [
 ];
 /** Guardrails on this database's user; they apply to new connections. */
 function LimitsCard({ project, limits, onChange }: { project: Project; limits: ProjectLimits; onChange: () => Promise<void> }) {
-  const shown = (l: Limits) => Object.fromEntries(FIELDS.map((f) => [f.key, String(l[f.key] === -1 ? -1 : l[f.key] / f.scale)])) as Record<keyof Limits, string>;
+  const shown = (l: Limits) => Object.fromEntries(FIELDS.map((f) => [f.key, String(l[f.key] === -1 ? -1 : Math.round((l[f.key] / f.scale) * 100) / 100)])) as Record<keyof Limits, string>;
   const [values, setValues] = useState(shown(limits)); const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const { showToast } = useToast();
   useEffect(() => { setValues(shown(limits)); }, [limits.revision]);
   const parsed = Object.fromEntries(FIELDS.map((f) => { const n = Number(values[f.key]); return [f.key, n === -1 ? -1 : Math.round(n * f.scale)]; })) as Limits;
+  // An empty field is not "0": Number("") would silently turn a timeout off.
+  const invalid = FIELDS.some((f) => values[f.key].trim() === "" || Number.isNaN(Number(values[f.key])));
   const dirty = FIELDS.some((f) => parsed[f.key] !== limits[f.key]); const applied = limits.applied_revision >= limits.revision;
   async function save(next: Limits) { setBusy(true); setError(""); try { await api<ProjectLimits>(`/projects/${project.id}/limits`, { method: "PUT", body: JSON.stringify({ ...next, revision: limits.revision }) }); showToast("Limits saved"); await onChange(); } catch (failure) { setError((failure as Error).message); if ((failure as { status?: number }).status === 409) await onChange(); } finally { setBusy(false); } }
-  return <Card><CardHeader title="Limits" aside={<Pill tone={applied ? "good" : "wait"}>{applied ? "Active" : "Applying…"}</Pill>} />
+  return <Card><CardHeader title="Limits" aside={<Pill tone={applied ? "good" : limits.last_error ? "bad" : "wait"}>{applied ? "Active" : limits.last_error ? "Not applied" : "Applying…"}</Pill>} />
+    {!applied && limits.last_error && <ErrorNotice message={limits.last_error} />}
     <div className="limits-grid">{FIELDS.map((f) => <label key={f.key} className="field"><span>{f.label} <small>({f.unit})</small></span><input inputMode="numeric" value={values[f.key]} onChange={(event) => setValues({ ...values, [f.key]: event.target.value })} aria-label={f.label} /><small className="caption">{f.hint}</small></label>)}</div>
     <p className="caption">Changes apply to new connections; open ones keep their settings until they reconnect.</p>
     {error && <ErrorNotice message={error} />}
-    <div className="actions"><Button loading={busy} disabled={!dirty || FIELDS.some((f) => Number.isNaN(Number(values[f.key])))} onClick={() => void save(parsed)}>{busy ? "Saving…" : "Save limits"}</Button><Button variant="ghost" disabled={busy} onClick={() => void save(DEFAULTS)}>Reset to defaults</Button></div>
+    <div className="actions"><Button loading={busy} disabled={!dirty || invalid} onClick={() => void save(parsed)}>{busy ? "Saving…" : "Save limits"}</Button><Button variant="ghost" disabled={busy} onClick={() => void save(DEFAULTS)}>Reset to defaults</Button></div>
   </Card>;
 }

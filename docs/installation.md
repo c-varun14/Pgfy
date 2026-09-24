@@ -215,13 +215,14 @@ Loopback-forwarded connections are admitted per project without a public port; t
 PostgreSQL accepts 150 connections. Three are kept for maintenance and ten are reserved for the dashboard's management
 role and health checks (`reserved_connections`, with `pg_use_reserved_connections` granted to them), so project
 databases can never lock the dashboard out; the remaining 137 are shared by all databases. Settings → Connections shows
-what is in use, each database's limit and the sum of the limits, and warns at 80% of the total or of a database's own
-limit. Limits may add up to more than 137: that is fine while not every application is busy at once.
+what is in use, each database's limit and the sum of the limits, and warns when database connections reach 80% of the
+137 or a database reaches 80% of its own limit. Limits may add up to more than 137: that is fine while not every application is busy at once.
 
 Each database's user carries guardrails, set when it is created and editable on its Access tab: statement timeout 60 s,
 idle-in-transaction timeout 5 minutes, lock wait 10 s, temporary files 1 GB per session and 25 connections. The
 connection limit and the temporary-file limit are enforced; the three timeouts are defaults an application may override
-with `SET` for its own session (Pgfy restores them if the role's defaults are changed). Changes apply to new
+with `SET` for its own session (Pgfy restores them if the role's defaults, or per-database defaults for its own
+database, are changed). Changes apply to new
 connections. Restores run under the management role and are not bound by these limits.
 
 "Change password" on the Connect tab issues a new password, sets it on the database user, closes every session of that

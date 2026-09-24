@@ -23,6 +23,7 @@ CREATE TABLE project_limits (
  connection_limit INTEGER NOT NULL,
  revision INTEGER NOT NULL DEFAULT 1,
  applied_revision INTEGER NOT NULL DEFAULT 0,
+ last_error TEXT NOT NULL DEFAULT '',
  updated_at INTEGER NOT NULL
 );
 -- Existing roles were created with CONNECTION LIMIT 25; everything else is new.

@@ -552,8 +552,10 @@ def install(args):
         if data_state != "empty" or state["stage"] != "preparing" or any((root / "data/sqlite").iterdir()):
             raise InstallError("Existing management storage is missing. Restore SQLite; setup will not be reopened.")
         installation.compose("run", "--rm", "--no-deps", "application", "initialize-store")
-    installation.compose("up", "-d", "postgres", "application", "caddy", timeout=180)
+    # The application applies limits that rely on these grants, so PostgreSQL is converged before it starts.
+    installation.compose("up", "-d", "postgres", timeout=180)
     converge_postgres(installation)
+    installation.compose("up", "-d", "postgres", "application", "caddy", timeout=180)
     print("Checking authenticated PostgreSQL, SQLite, and dashboard routing…", flush=True)
     installation.verify()
     cfg["caddy_version"] = installation.compose("exec", "-T", "caddy", "caddy", "version").stdout.strip()
