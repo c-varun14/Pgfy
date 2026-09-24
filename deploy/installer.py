@@ -685,8 +685,12 @@ CONVERGE_CONTRACT = "1"
 class Interrupted(KeyboardInterrupt):
     pass
 
+_shield = {"on": False}
+
 def _interrupt(signum, frame):
-    raise Interrupted(f"signal {signum}")
+    # Once a rollback has begun, a second signal must not abort it half-way.
+    if not _shield["on"]:
+        raise Interrupted(f"signal {signum}")
 
 @contextlib.contextmanager
 def signals(handler):
@@ -715,14 +719,14 @@ def app_status(installation):
         return "absent"
     return run(["docker", "inspect", "--format", "{{.State.Status}}", identifier]).stdout.strip()
 
-def stop_application(installation):
+def stop_application(installation, failure="The application did not stop; nothing was changed."):
     installation.compose("stop", "application", timeout=120)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
-        if app_status(installation) != "running" and app_status(installation) != "restarting":
+        if app_status(installation) not in ("running", "restarting"):
             return
         time.sleep(1)
-    raise InstallError("The application did not stop; nothing was changed.")
+    raise InstallError(failure)
 
 def app_command(installation, *args, running=True, check=True):
     """Run a pgfy host command in the running application, or in a one-off container of the configured release."""
@@ -735,8 +739,13 @@ def store_file(root, image, *args):
     return run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", "10001:10001", "-v", f"{root}/data/sqlite:/data", image, *args], timeout=600)
 
 def run_converge(installation, bundle, lock_fd):
-    """The new release applies its own host configuration while this process keeps the lock."""
-    run([sys.executable, bundle / "installer.py", "--dir", installation.root, "converge", "--contract", CONVERGE_CONTRACT, "--lock-fd", lock_fd], timeout=600, pass_fds=(lock_fd,))
+    """The new release applies its own host configuration while this process keeps the lock. Its messages go
+    straight to the operator's terminal; it prints no secrets."""
+    run([sys.executable, bundle / "installer.py", "--dir", installation.root, "converge", "--contract", CONVERGE_CONTRACT, "--lock-fd", lock_fd], timeout=600, capture=False, pass_fds=(lock_fd,))
+
+def discard_snapshot(root, image):
+    """The snapshot lives in the application user's private directory; remove it as that user."""
+    run(["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "10001:10001", "-v", f"{root}/data/sqlite:/data", "--entrypoint", "rm", image, "-f", "/data/" + SNAPSHOT_DB], timeout=120)
 
 def converge(root, contract, lock_fd):
     if contract != CONVERGE_CONTRACT:
@@ -777,7 +786,8 @@ def update(root, bundle, drain=False, lock_fd=None):
         run(["docker", "compose", "--project-name", state["volume_prefix"], "--env-file", candidate.name, "-f", target / "compose.yaml", "-f", target / f"compose.{cfg['mode']}.yaml", "config", "--quiet"])
     status = app_status(installation)
     was_running = status == "running"
-    snapshot_ready = False
+    snapshot_ready = committed = False
+    step = "pausing the installation"
     with signals(None):
         try:
             if was_running:
@@ -798,6 +808,7 @@ def update(root, bundle, drain=False, lock_fd=None):
                 stop_application(installation)
                 app_command(installation, "maintenance", "on", running=False)
             print("Application stopped. Taking a snapshot of management storage…", flush=True)
+            step = "taking the snapshot"
             rollback_dir.mkdir(mode=0o700)
             saved = {}
             for name in UPDATE_FILES:
@@ -813,29 +824,45 @@ def update(root, bundle, drain=False, lock_fd=None):
             fsync_dir(rollback_dir)
             snapshot_ready = True
             # Apply. Sessions are signed out: the new generation changes every session scope.
+            step = "switching to the new release"
             caddy_version = run(["docker", "run", "--rm", "--network", "none", release["images"]["caddy"], "caddy", "version"], timeout=120).stdout.strip()
             json_write(root / "state.json", new_state)
             atomic(root / "compose.env", compose_env(root, new_state, cfg), 0o600)
             json_write(root / "config/install.json", dict(cfg, release=release["version"], generation=uuid.uuid4().hex, caddy_version=caddy_version), 0o644)
             write_pgfyctl(root, target)
             installation = Installation(root)
+            step = "applying the new release's host configuration"
             run_converge(installation, target, lock_fd)
             print("Starting the new release…", flush=True)
+            step = "starting the new release"
             installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=180)
+            step = "verifying readiness"
             installation.verify()
             # Commit point: from here on the new release stays, whatever happens during cleanup.
             (rollback_dir / "meta.json").unlink()
+            committed = True
             fsync_dir(rollback_dir)
         except BaseException as error:
-            with signals(signal.SIG_IGN):
-                if snapshot_ready:
-                    rollback_update(root, reason=error)
-                unquiesce(installation, was_running)
-            if isinstance(error, InstallError):
-                raise
-            raise InstallError(f"Update interrupted before anything changed ({error or type(error).__name__}); the application was restarted.") from error
+            _shield["on"] = True
+            try:
+                with signals(signal.SIG_IGN):
+                    if not committed:
+                        reason = f"{step}: {error or type(error).__name__}"
+                        if snapshot_ready:
+                            raise InstallError(rollback_update(root, reason=reason)) from error
+                        shutil.rmtree(rollback_dir, ignore_errors=True)
+                        try:
+                            discard_snapshot(root, state["images"]["application"])
+                        except InstallError:
+                            pass
+                        unquiesce(installation, was_running)
+                        if isinstance(error, InstallError):
+                            raise
+                        raise InstallError(f"Update stopped while {reason}; nothing was changed and the application was restarted.") from error
+            finally:
+                _shield["on"] = False
     finish = [("turn maintenance off", lambda: app_command(installation, "maintenance", "off")),
-              ("remove the storage snapshot", lambda: (root / "data/sqlite" / SNAPSHOT_DB).unlink(missing_ok=True)),
+              ("remove the storage snapshot", lambda: discard_snapshot(root, release["images"]["application"])),
               ("remove the hostname rollback record", lambda: (root / "access-rollback.json").unlink(missing_ok=True)),
               ("remove update-rollback/", lambda: shutil.rmtree(rollback_dir))]
     for step, action in finish:
@@ -875,8 +902,7 @@ def rollback_update(root, reason=None):
         installation = Installation(root)
         unquiesce(installation, True)
         shutil.rmtree(rollback_dir, ignore_errors=True)
-        print("No update was applied; the application was restarted.")
-        return
+        return "No update was applied; the application was restarted."
     meta = read_json(meta_path)
     if meta.get("format") != 1:
         raise InstallError("update-rollback/ was written by an unknown installer version; restore it by hand.")
@@ -890,7 +916,7 @@ def rollback_update(root, reason=None):
     for name, (mode, uid, gid) in meta["files"].items():
         atomic(root / name, (rollback_dir / "files" / name).read_bytes(), mode, uid, gid)
     installation = Installation(root)
-    stop_application(installation)
+    stop_application(installation, f"The application did not stop during the rollback. update-rollback/ is kept; run pgfyctl rollback-update to retry.")
     cfg = installation.config()
     json_write(root / "config/install.json", dict(cfg, generation=uuid.uuid4().hex), 0o644)
     store_file(root, old_image, "store-restore", "/data/" + SNAPSHOT_DB)
@@ -899,11 +925,13 @@ def rollback_update(root, reason=None):
         installation.verify()
     except InstallError as error:
         raise InstallError(f"Rollback to {meta['from']} did not reach readiness. update-rollback/ is kept; run pgfyctl diagnostics, then pgfyctl rollback-update to retry.") from error
-    app_command(installation, "maintenance", "off", check=False)
-    (root / "data/sqlite" / SNAPSHOT_DB).unlink(missing_ok=True)
+    if app_command(installation, "maintenance", "off", check=False).returncode:
+        print("Warning: backups are still paused. Run pgfyctl maintenance off.")
+    discard_snapshot(root, old_image)
     shutil.rmtree(rollback_dir)
-    detail = f" at: {reason}" if reason else ""
-    raise InstallError(f"Update to {meta['to']} failed{detail}. Restored {meta['from']}; it is ready. Sign in again.")
+    if reason:
+        return f"Update to {meta['to']} failed while {reason}. Restored {meta['from']}; it is ready. Sign in again."
+    return f"Rolled back the interrupted update to {meta['to']}. Restored {meta['from']}; it is ready. Sign in again."
 
 def diagnostics(installation):
     cfg = installation.config()
@@ -972,7 +1000,7 @@ def main():
                 update(root, args.bundle, args.drain, lock_fd)
             elif args.command == "rollback-update":
                 with signals(signal.SIG_IGN):
-                    rollback_update(root)
+                    print(rollback_update(root))
             else:
                 installation = Installation(Path(args.dir).resolve())
                 if args.command == "diagnostics":

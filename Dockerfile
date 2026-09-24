@@ -27,9 +27,9 @@ FROM ${POSTGRES_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 pgfy && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin pgfy \
     && mkdir -p /data && chown 10001:10001 /data \
-    && psql --version | grep -E '18\.6([[:space:]]|$)' \
-    && pg_dump --version | grep -E '18\.6([[:space:]]|$)' \
-    && pg_restore --version | grep -E '18\.6([[:space:]]|$)'
+    && psql --version | grep -E ' 18\.[0-9]+([[:space:]]|$)' \
+    && pg_dump --version | grep -E ' 18\.[0-9]+([[:space:]]|$)' \
+    && pg_restore --version | grep -E ' 18\.[0-9]+([[:space:]]|$)'
 COPY --from=backend /out/pgfy /usr/local/bin/pgfy
 USER 10001:10001
 WORKDIR /data

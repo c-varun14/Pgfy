@@ -327,6 +327,52 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(host.ran("store-restore"))
         self.assertFalse((self.root / "update-rollback").exists())
 
+    def test_failure_before_the_snapshot_is_recorded_changes_nothing(self):
+        host = FakeHost()
+        host.fail_on = lambda args: "store-snapshot" in args
+        with self.assertRaisesRegex(installer.InstallError, "injected failure"):
+            self.update(host)
+        self.assertFalse((self.root / "update-rollback").exists(), "a half-made snapshot would block the next update")
+        self.assertTrue(host.ran("--entrypoint", "rm"))
+        self.assertTrue(host.ran("maintenance", "off"))
+        self.assertFalse(host.ran("store-restore"))
+        self.assertEqual({n: (self.root / n).read_bytes() for n in installer.UPDATE_FILES}, self.files)
+
+    def test_any_exception_after_the_snapshot_rolls_back(self):
+        host = FakeHost()
+        with patch.object(installer, "compose_env", side_effect=[installer.compose_env(self.root, installer.read_json(self.root / "state.json"), installer.read_json(self.root / "config/install.json")), KeyError("images")]):
+            with self.assertRaisesRegex(installer.InstallError, "failed while switching to the new release.*Restored v0.1.0"):
+                self.update(host)
+        self.assertEqual((self.root / "state.json").read_bytes(), self.files["state.json"])
+        self.assertTrue(host.ran("store-restore"))
+
+    def test_a_failure_after_the_commit_point_keeps_the_new_release(self):
+        host = FakeHost()
+        real = installer.fsync_dir
+        calls = []
+        def fsync(path):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("fsync failed")
+            real(path)
+        with patch.object(installer, "fsync_dir", fsync):
+            self.update(host)
+        self.assertEqual(installer.read_json(self.root / "state.json")["release"], "v0.2.0")
+        self.assertFalse(host.ran("store-restore"))
+
+    def test_a_held_lock_is_accepted_through_an_inherited_descriptor(self):
+        import fcntl, subprocess, sys
+        lock = Path(self.directory.name) / "pgfy.lock"
+        with patch.object(installer, "lock_path", lambda root: str(lock)):
+            with open(lock, "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertTrue(installer.holds_lock(self.root, held.fileno()))
+                with open(lock, "a") as other:
+                    self.assertFalse(installer.holds_lock(self.root, other.fileno()))
+                probe = f"import fcntl,os,sys; fd=int(sys.argv[1]); fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB); s=os.fstat(fd); t=os.stat({str(lock)!r}); sys.exit(0 if (s.st_dev,s.st_ino)==(t.st_dev,t.st_ino) else 1)"
+                child = subprocess.run([sys.executable, "-c", probe, str(held.fileno())], pass_fds=(held.fileno(),))
+                self.assertEqual(child.returncode, 0)
+
     def test_converge_requires_the_held_lock(self):
         with self.assertRaisesRegex(installer.InstallError, "contract"):
             installer.converge(self.root, "2", None)
