@@ -130,7 +130,9 @@ func (p *Provisioner) provision(ctx context.Context, project store.Project) erro
 		name string
 		run  func(context.Context) error
 	}{
-		{"role_created", func(ctx context.Context) error { return p.PG.EnsureRole(ctx, project.RoleName, string(password), limits.ConnectionLimit) }},
+		{"role_created", func(ctx context.Context) error {
+			return p.PG.EnsureRole(ctx, project.RoleName, string(password), limits.ConnectionLimit)
+		}},
 		{"database_created", func(ctx context.Context) error { return p.PG.EnsureDatabase(ctx, project.DBName, project.RoleName) }},
 		{"ready", func(ctx context.Context) error {
 			// A project never serves without its guardrails.

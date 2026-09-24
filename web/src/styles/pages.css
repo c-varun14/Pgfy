@@ -62,3 +62,4 @@
 .plain-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .plain-table th { text-align: left; font-size: 12px; font-weight: 600; color: var(--text-faint); padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); }
 .plain-table td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--border); }
+.warn-text { color: var(--warn); }

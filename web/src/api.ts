@@ -58,9 +58,19 @@ export type DatabaseAccess = {
   port: number;
   certificate: Certificate;
 };
+export type HostDisk = { name: "postgres" | "workspace" | "root"; device?: number; total_bytes?: number; free_bytes?: number; free_percent: number; low: boolean; error?: string };
+export type HostStatus = {
+  /** ok, stale (the host timer stopped writing) or unknown. */
+  state: "ok" | "stale" | "unknown";
+  written_at: number;
+  disks: HostDisk[];
+  ntp_synchronized: boolean | null;
+  certificate: { state: string; issuer?: string; expires_at: number | null; expiring: boolean; last_sync?: { at: string; ok: boolean; message: string } };
+};
 export type Status = {
   ready: boolean;
   maintenance?: boolean;
+  host?: HostStatus;
   sqlite: { status: string; version: string };
   postgres: { status: string; version: string };
   versions: Record<string, string>;

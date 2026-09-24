@@ -16,14 +16,14 @@ export default defineConfig({
     // The real binary against a fresh installation: setup, login, degradation.
     {
       name: "server",
-      testIgnore: /(backups|access)\.spec\.ts/,
+      testIgnore: /(backups|access|host)\.spec\.ts/,
       use: { baseURL: "http://127.0.0.1:8080", launchOptions },
     },
     // The mock API, which mirrors the same contract with backups present, so
     // the backup states can be exercised without a bucket or a database.
     {
       name: "mock",
-      testMatch: /(backups|access)\.spec\.ts/,
+      testMatch: /(backups|access|host)\.spec\.ts/,
       use: {
         baseURL: `http://127.0.0.1:${mockPort}`,
         launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE },

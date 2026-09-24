@@ -97,7 +97,12 @@ sudo /opt/firstcommit/pgfyctl rollback-update
 sudo /opt/firstcommit/pgfyctl maintenance status|off
 ```
 
-`sync-db-cert` copies the certificate Caddy obtained for the dashboard hostname into PostgreSQL (validated, key permissions fixed, previous pair kept), reloads, and confirms a new TLS handshake presents it. The installer runs it once and installs a daily `pgfy-cert.timer` for renewals. Until it has succeeded, PostgreSQL serves a self-signed placeholder and the dashboard says so.
+The installer also enables unattended security updates (unless explicitly disabled on the host), holds the Docker
+packages it installed at their pinned versions, and installs `pgfy-host-status.timer`, which records disk space and
+clock synchronisation for the dashboard every five minutes (`pgfyctl host-status`). Routine upkeep, reboots and
+break-glass steps are in the [host runbook](host-runbook.md).
+
+`sync-db-cert` copies the certificate Caddy obtained for the dashboard hostname into PostgreSQL (validated, key permissions fixed, previous pair kept), reloads, and confirms a new TLS handshake presents it. The installer runs it once and installs a daily `pgfy-cert.timer` for renewals (also when switching to HTTPS with `pgfyctl hostname`; switching to tunnel mode stops it). Every attempt's outcome is recorded in `config/cert-sync.json`, and Settings shows the certificate's expiry. Until it has succeeded, PostgreSQL serves a self-signed placeholder and the dashboard says so.
 
 Token replacement works only before administrator creation and after the previous token expires. Losing an unexpired token requires waiting for expiry. Installer reruns never issue a replacement automatically. There is no public registration-reopening or password-reset endpoint.
 

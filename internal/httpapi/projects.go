@@ -60,13 +60,13 @@ func (s *Server) provisioningReady(w http.ResponseWriter) bool {
 
 type projectView struct {
 	store.Project
-	OpenToInternet  bool                 `json:"open_to_internet"`
-	RotationPending bool                 `json:"rotation_pending"`
-	Limits          *store.ProjectLimits `json:"limits,omitempty"`
-	SizeBytes       *int64               `json:"size_bytes"`
-	SizeError       string               `json:"size_error,omitempty"`
-	Policy      *store.PolicyState    `json:"policy,omitempty"`
-	Connections []postgres.Connection `json:"connections_now,omitempty"`
+	OpenToInternet  bool                  `json:"open_to_internet"`
+	RotationPending bool                  `json:"rotation_pending"`
+	Limits          *store.ProjectLimits  `json:"limits,omitempty"`
+	SizeBytes       *int64                `json:"size_bytes"`
+	SizeError       string                `json:"size_error,omitempty"`
+	Policy          *store.PolicyState    `json:"policy,omitempty"`
+	Connections     []postgres.Connection `json:"connections_now,omitempty"`
 }
 
 func (s *Server) projectSummary(r *http.Request, p store.Project) projectView {

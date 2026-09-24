@@ -9,7 +9,7 @@ All application endpoints use JSON under `/api/v1`. Responses containing authent
 | `POST /api/v1/auth/login` | `{email, password}` | 200, session cookie, `{email, csrf_token}` |
 | `POST /api/v1/auth/logout` | `{}` plus `X-CSRF-Token` | 204, session revoked, cookie cleared |
 | `GET /api/v1/auth/session` | Session cookie | `{email, expires_at, csrf_token, client_ip}` |
-| `GET /api/v1/system/status` | Session cookie | `ready`, `maintenance`, SQLite/PostgreSQL states and versions, app/tool versions, backup state, `database_access` |
+| `GET /api/v1/system/status` | Session cookie | `ready`, `maintenance`, `host` (`state` ok/stale/unknown, `written_at`, `disks[]` with `free_percent` and `low` under 15%, `ntp_synchronized`, `certificate` with `expires_at` from the served certificate, `expiring` within 14 days and `last_sync`), SQLite/PostgreSQL states and versions, app/tool versions, backup state, `database_access` |
 | `GET /api/v1/settings` | Session cookie | Read-only installation identity, hostname/origin/mode, release and recorded host versions |
 | `GET /api/v1/projects` | Session cookie | `{projects: [...], database_access}`; each project carries stage, `failed`, `stage_error`, `size_bytes` (or `size_error`), `open_to_internet` (its policy admits any address) and `rotation_pending` |
 | `GET /api/v1/system/connections` | Session cookie | `{max_connections, superuser_reserved, reserved, available, projects_used, projects_limit, other_used, warning, overcommitted, roles[], system[]}`; each role `{role, project, limit, connections, warning}`; `warning` at 80% of `available` or of a role's limit; 503 when PostgreSQL cannot be read |

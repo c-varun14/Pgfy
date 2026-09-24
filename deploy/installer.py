@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -253,6 +254,8 @@ def install_docker(release):
     run(["apt-get", "update"], timeout=300)
     packages = release["docker_packages"]
     run(["apt-get", "install", "-y", *[f"{name}={version}" for name, version in packages.items()]], timeout=600)
+    # Pinned versions stay pinned: a routine apt upgrade must not restart every container.
+    run(["apt-mark", "hold", *packages], timeout=60)
     run(["systemctl", "enable", "--now", "docker"], timeout=120)
 
 def network_preflight(hostname):
@@ -564,6 +567,9 @@ def install(args):
     # Refresh read-only version metadata; the session scope remains unchanged.
     installation.compose("restart", "application", timeout=60)
     installation.verify()
+    converge_host(root, mode)
+    unattended_upgrades()
+    host_status(installation)
     state["stage"] = "installed"
     json_write(root / "state.json", state)
     print(f"Installation verified: {cfg['origin']}")
@@ -572,7 +578,6 @@ def install(args):
         print("PostgreSQL listens on 127.0.0.1:5432 only. Use ssh -L 5432:127.0.0.1:5432 user@server.")
     else:
         sync_db_cert(installation, fatal=False)
-        install_cert_timer(root)
         print(f"Direct database access: {hostname}:5432 over TLS. Open TCP 5432 in your provider firewall to allow application connections.")
     if not existing:
         # Token command emits plaintext only to this terminal, never container logs.
@@ -615,7 +620,9 @@ def change_access(installation, mode, hostname="", rollback=False):
         atomic(root / "config/caddy/Caddyfile", saved_caddy, 0o644)
         atomic(root / "compose.env", compose_env(root, installation.state, old), 0o600)
         installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=120, check=False)
+        converge_host(root, old["mode"])
         raise InstallError("Access change failed; previous configuration restored. Sign in again. If the host was interrupted, run pgfyctl rollback-hostname.")
+    converge_host(root, new["mode"])
     print(f"Access verified: {new['origin']}. Previous sessions are invalid; sign in again.")
     if new["mode"] == "tunnel":
         print("Loopback access only. Use ssh -L 8080:127.0.0.1:8080 user@server.")
@@ -629,8 +636,25 @@ def certificate_fingerprint(path):
     return out.strip().split("=", 1)[1]
 
 def sync_db_cert(installation, fatal=True):
-    """Deliver Caddy's certificate for the dashboard hostname to PostgreSQL. Caddy issues and
-    renews; this copies, validates, reloads, and confirms a new connection sees the change."""
+    """Deliver Caddy's certificate for the dashboard hostname to PostgreSQL, recording every outcome in
+    config/cert-sync.json for the dashboard. Tunnel mode has no database certificate and records nothing."""
+    if installation.config()["mode"] != "https":
+        return deliver_db_cert(installation, fatal)
+    try:
+        deliver_db_cert(installation, fatal=True)
+    except InstallError as error:
+        record_cert_sync(installation.root, False, str(error))
+        if fatal:
+            raise
+        print(f"Database certificate not synced yet: {error} The self-signed placeholder remains; clients cannot verify it until sync succeeds.")
+        return
+    record_cert_sync(installation.root, True, "")
+
+def record_cert_sync(root, ok, message):
+    json_write(root / "config/cert-sync.json", {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ok": ok, "message": message}, 0o644)
+
+def deliver_db_cert(installation, fatal=True):
+    """Caddy issues and renews; this copies, validates, reloads, and confirms a new connection sees the change."""
     root = installation.root
     cfg = installation.config()
     tls = root / "config/postgres-tls"
@@ -683,15 +707,77 @@ def sync_db_cert(installation, fatal=True):
             raise
         print(f"Database certificate not synced yet: {error} The self-signed placeholder remains; clients cannot verify it until sync succeeds.")
 
-def install_cert_timer(root):
+class SimpleResult:
+    def __init__(self, returncode, stdout):
+        self.returncode, self.stdout = returncode, stdout
+
+def converge_host(root, mode):
+    """Host timers for this release: status every five minutes in both modes, certificate delivery only with
+    a public hostname. Idempotent; switching to tunnel mode stops the certificate timer."""
     units = {
-        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nExecStart={root}/pgfyctl sync-db-cert\n",
+        "/etc/systemd/system/pgfy-host-status.service": f"[Unit]\nDescription=Record Pgfy host status (disk, clock)\n\n[Service]\nType=oneshot\nTimeoutStartSec=120\nExecStart={root}/pgfyctl host-status\n",
+        "/etc/systemd/system/pgfy-host-status.timer": "[Unit]\nDescription=Pgfy host status every five minutes\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=5min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n",
+        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nTimeoutStartSec=120\nExecStart={root}/pgfyctl sync-db-cert\n",
         "/etc/systemd/system/pgfy-cert.timer": "[Unit]\nDescription=Daily Pgfy database certificate sync\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
     }
     for path, content in units.items():
         atomic(path, content, 0o644)
     run(["systemctl", "daemon-reload"], check=False)
-    run(["systemctl", "enable", "--now", "pgfy-cert.timer"], check=False)
+    run(["systemctl", "enable", "--now", "pgfy-host-status.timer"], check=False)
+    run(["systemctl", "enable" if mode == "https" else "disable", "--now", "pgfy-cert.timer"], check=False)
+
+def host_status(installation):
+    """Disk and clock facts the dashboard cannot see from its container. Runs without the installation lock:
+    it only reads files that are replaced atomically and writes its own."""
+    root = installation.root
+    paths = {"postgres": None, "workspace": root / "data/work", "root": Path("/")}
+    def probe(args):
+        # A missing or hung tool is an unknown, never a crash of the five-minute timer.
+        try:
+            return run(args, check=False, timeout=60)
+        except InstallError:
+            return SimpleResult(1, "")
+    mountpoint = probe(["docker", "volume", "inspect", installation.state["volume_prefix"] + "_postgres", "--format", "{{.Mountpoint}}"])
+    if mountpoint.returncode == 0 and mountpoint.stdout.strip():
+        paths["postgres"] = Path(mountpoint.stdout.strip())
+    disks = []
+    for name, path in paths.items():
+        try:
+            if path is None:
+                raise OSError("volume not found")
+            usage = shutil.disk_usage(path)
+            disks.append({"name": name, "device": os.stat(path).st_dev, "total_bytes": usage.total, "free_bytes": usage.free})
+        except OSError:
+            # Never a fabricated zero: an unmeasurable path says so.
+            disks.append({"name": name, "error": "could not be measured"})
+    ntp = probe(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+    synchronized = {"yes": True, "no": False}.get(ntp.stdout.strip()) if ntp.returncode == 0 else None
+    status = {"version": 1, "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "disks": disks, "ntp": {"synchronized": synchronized}}
+    json_write(root / "config/host-status.json", status, 0o644)
+    return status
+
+def unattended_upgrades():
+    """Security updates install themselves unless the operator explicitly turned that off. Never fatal."""
+    environment = dict(os.environ, DEBIAN_FRONTEND="noninteractive", NEEDRESTART_MODE="l")
+    try:
+        # Prints UU='1', or nothing when unset.
+        current = run(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"], check=False).stdout
+        value = shlex.split(current.strip().partition("=")[2])[0] if "=" in current else ""
+        if value == "1":
+            return "enabled"
+        if value == "0":
+            print("Warning: unattended security updates are explicitly disabled on this host; see the host runbook.")
+            return "disabled by operator"
+        installed = run(["dpkg-query", "-W", "-f=${Status}", "unattended-upgrades"], check=False)
+        if "install ok installed" not in installed.stdout:
+            for command in (["update"], ["install", "-y", "unattended-upgrades"]):
+                subprocess.run(["apt-get", "-o", "DPkg::Lock::Timeout=120", *command], env=environment, capture_output=True, text=True, timeout=600, check=True)
+        if not Path("/etc/apt/apt.conf.d/20auto-upgrades").exists():
+            atomic("/etc/apt/apt.conf.d/20auto-upgrades", 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n', 0o644)
+        return "enabled"
+    except (InstallError, OSError, subprocess.SubprocessError):
+        print("Warning: unattended security updates could not be enabled; enable them by hand (see the host runbook).")
+        return "unknown"
 
 UPDATE_FILES = ("state.json", "compose.env", "config/install.json", "config/caddy/Caddyfile", "config/pg/pg_hba.conf", "pgfyctl")
 SNAPSHOT_DB = ".update-rollback.db"  # inside data/sqlite, owned by the application user
@@ -772,6 +858,7 @@ def converge(root, contract, lock_fd):
 def converge_installation(installation):
     """Everything this release changes on an installed host during an update."""
     converge_steps(installation)
+    converge_host(installation.root, installation.config()["mode"])
     # PostgreSQL keeps running through an update; the later force-recreate applies new server flags.
     installation.compose("up", "-d", "--no-recreate", "postgres", timeout=180)
     converge_postgres(installation)
@@ -976,6 +1063,19 @@ def diagnostics(installation):
     print("Maintenance (backups and changes paused):", maintenance + (" — run pgfyctl maintenance off if no update is running" if maintenance == "on" else ""))
     if (installation.root / "update-rollback").exists():
         print("An unfinished update left update-rollback/. Run pgfyctl rollback-update.")
+    try:
+        status = host_status(installation)
+        for disk in status["disks"]:
+            if "error" in disk:
+                print(f"Disk {disk['name']}: could not be measured")
+            else:
+                print(f"Disk {disk['name']}: {100 * disk['free_bytes'] // max(disk['total_bytes'], 1)}% free")
+        print("Clock synchronised:", {True: "yes", False: "NO — TOTP codes and certificates depend on it", None: "unknown"}[status["ntp"]["synchronized"]])
+    except (InstallError, OSError) as error:
+        print("Host status unavailable:", error)
+    upgrades = run(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"], check=False).stdout.strip() or "unset"
+    timer = run(["systemctl", "is-enabled", "apt-daily-upgrade.timer"], check=False).stdout.strip() or "unknown"
+    print(f"Unattended upgrades: {upgrades}; apt-daily-upgrade.timer {timer}")
     print("No secrets or raw logs are included. Bootstrap credentials stay in restricted host files.")
 
 def main():
@@ -995,6 +1095,7 @@ def main():
     sub.add_parser("tunnel")
     sub.add_parser("rollback-hostname")
     sub.add_parser("sync-db-cert")
+    sub.add_parser("host-status", help="record disk and clock status for the dashboard (run by a timer)")
     update_parser = sub.add_parser("update", help="update to an extracted, newer release bundle")
     update_parser.add_argument("bundle")
     update_parser.add_argument("--drain", action="store_true", help="wait for a running backup or restore instead of refusing")
@@ -1009,6 +1110,10 @@ def main():
         parser.exit(1, "Host administration requires root; run this command with sudo.\n")
     root = Path(args.dir).resolve()
     try:
+        if args.command == "host-status":
+            # Runs every five minutes, also while an update holds the lock.
+            host_status(Installation(root))
+            return
         if args.command == "converge":
             # Runs under the lock held by the updating installer; taking it again would deadlock.
             converge(root, args.contract, args.lock_fd)

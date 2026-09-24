@@ -18,6 +18,7 @@ import (
 
 	"github.com/c-varun14/Pgfy/internal/config"
 	"github.com/c-varun14/Pgfy/internal/hba"
+	"github.com/c-varun14/Pgfy/internal/hoststatus"
 	"github.com/c-varun14/Pgfy/internal/httpapi"
 	"github.com/c-varun14/Pgfy/internal/jobs"
 	"github.com/c-varun14/Pgfy/internal/postgres"
@@ -180,7 +181,9 @@ func run() error {
 			return errors.New("invalid trusted proxy CIDR")
 		}
 	}
-	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json")}
+	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"),
+		HostPaths: hoststatus.Paths{Status: config.Env("PGFY_HOST_STATUS", "/etc/pgfy/host-status.json"), CertSync: config.Env("PGFY_CERT_SYNC", "/etc/pgfy/cert-sync.json"),
+			TLSState: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"), Certificate: config.Env("PGFY_TLS_CERT", "/etc/pgfy/postgres-tls/server.crt")}}
 	srv := http.Server{Addr: config.Env("PGFY_LISTEN", ":3000"), Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

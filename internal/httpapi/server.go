@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/c-varun14/Pgfy/internal/config"
+	"github.com/c-varun14/Pgfy/internal/hoststatus"
 	"github.com/c-varun14/Pgfy/internal/jobs"
 	"github.com/c-varun14/Pgfy/internal/postgres"
 	"github.com/c-varun14/Pgfy/internal/provision"
@@ -41,6 +42,7 @@ type Server struct {
 	Provisioner  *provision.Provisioner
 	Jobs         *jobs.Worker
 	TLSStatePath string
+	HostPaths    hoststatus.Paths
 	Now          func() time.Time
 	limiter      rateLimit
 	hashSlots    chan struct{}
@@ -404,7 +406,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	var sqliteVersion string
 	_ = s.Store.DB.QueryRowContext(r.Context(), "SELECT sqlite_version()").Scan(&sqliteVersion)
 	maintenance, _ := s.Store.Maintenance(r.Context())
-	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "maintenance": maintenance, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": s.backupStatus(r), "database_access": s.databaseAccess()})
+	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "maintenance": maintenance, "host": hoststatus.Read(s.HostPaths, s.Config.Mode, s.Now()), "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": s.backupStatus(r), "database_access": s.databaseAccess()})
 }
 
 // backupStatus answers from the reconciled view in SQLite, so it stays cheap
