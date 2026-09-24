@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/c-varun14/Pgfy/internal/alerts"
 	"github.com/c-varun14/Pgfy/internal/config"
 	"github.com/c-varun14/Pgfy/internal/hoststatus"
 	"github.com/c-varun14/Pgfy/internal/jobs"
@@ -43,6 +44,7 @@ type Server struct {
 	Jobs         *jobs.Worker
 	TLSStatePath string
 	HostPaths    hoststatus.Paths
+	Alerts       *alerts.Engine
 	Now          func() time.Time
 	limiter      rateLimit
 	hashSlots    chan struct{}
@@ -117,6 +119,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/projects/{id}/limits", s.putLimits)
 	mux.HandleFunc("POST /api/v1/projects/{id}/credentials/rotate", s.rotateCredentials)
 	mux.HandleFunc("GET /api/v1/system/connections", s.connectionBudget)
+	mux.HandleFunc("GET /api/v1/settings/alerts", s.getAlertSettings)
+	mux.HandleFunc("PUT /api/v1/settings/alerts", s.putAlertSettings)
+	mux.HandleFunc("POST /api/v1/settings/alerts/test", s.testAlerts)
+	mux.HandleFunc("GET /api/v1/alerts", s.listAlerts)
 	mux.HandleFunc("POST /api/v1/projects/{id}/connection-checks", s.createConnectionCheck)
 	mux.HandleFunc("GET /api/v1/projects/{id}/connection-checks/{check}", s.getConnectionCheck)
 	mux.HandleFunc("GET /api/v1/settings/storage", s.getStorage)
@@ -430,24 +436,12 @@ func (s *Server) backupStatus(r *http.Request) string {
 	if e != nil {
 		return "unavailable"
 	}
-	projects, e := s.Store.Projects(r.Context())
+	late, e := s.Store.LateProjects(r.Context(), target, s.Config.ID, policy.Interval(), s.Now())
 	if e != nil {
 		return "unavailable"
 	}
-	newest, e := s.Store.NewestRecoverable(r.Context(), target, s.Config.ID)
-	if e != nil {
-		return "unavailable"
-	}
-	// A backup older than 1.5 times the target is late enough to say so, and a
-	// ready project with no backup at all counts as late once due.
-	deadline := s.Now().Add(-3 * policy.Interval() / 2).Unix()
-	for _, p := range projects {
-		if p.Stage != "ready" || p.Failed {
-			continue
-		}
-		if at, ok := newest[p.ID]; (!ok && p.ReadyAt < deadline) || (ok && at < deadline) {
-			return "stale"
-		}
+	if len(late) > 0 {
+		return "stale"
 	}
 	return "ok"
 }

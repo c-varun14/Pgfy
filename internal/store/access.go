@@ -238,5 +238,8 @@ func (s *Store) CompleteRotation(ctx context.Context, projectID, sealed string, 
 	if e = audit(ctx, tx, entry); e != nil {
 		return false, e
 	}
+	if e = RecordAlertEvent(ctx, tx, "credential_rotated", "credential_rotated:"+projectID, "A database password was changed", "Project "+projectID+"; every session using the old password was closed.", time.Unix(entry.At, 0)); e != nil {
+		return false, e
+	}
 	return true, tx.Commit()
 }

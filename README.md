@@ -18,13 +18,14 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 - Backups to any S3-compatible bucket configured in Settings: storage check, a configurable target interval, manual backups, manifests published last, durable one-at-a-time jobs that survive browser closure and report restarts as interrupted. A failing database backs off and never blocks the ones behind it.
 - Retention keyed off the bucket: the newest backup of each database plus a daily and weekly series, deleting the manifest before the archive and only when the bucket keeps versions of deleted objects.
 - Access and capacity: an "Open to the internet" marker, a connection budget with reserved slots for the dashboard, per-database guardrails and connection limits, and password rotation that ends old sessions. Administrative actions are recorded in an append-only audit table.
+- Alerts to one JSON webhook (Slack-compatible) for failing or late backups, PostgreSQL down, low disk, clock drift, certificate expiry, connection pressure and more, each at most daily with a resolved message.
 - Host status (disk, clock, certificate expiry) reported every five minutes and shown in Settings; unattended security updates; a [host runbook](docs/host-runbook.md).
 - Host-side updates with `pgfyctl update`: jobs paused, SQLite and configuration snapshotted, readiness verified, and an automatic rollback to the previous release on any failure. See [Updating](docs/installation.md#updating).
 - Recovery on a fresh install from the bucket alone: checksum, version compatibility, restore into a new project, named verification checks reported as verified, partly verified or not verified, credential handoff. See the [recovery runbook](docs/recovery-runbook.md).
 
 ## Planned, not implemented
 
-- External alerts, a second factor for the dashboard, host-side admin reset, project deletion, and the other items in the post-hackathon
+- A second factor for the dashboard, host-side admin reset, project deletion, and the other items in the post-hackathon
   [production-readiness roadmap](docs/phases.md#phase-6--post-demo-hardening-and-operation) (Phase 6). That work happens on the
   `mvp-to-production` branch; `main` is the hackathon submission.
 - The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.

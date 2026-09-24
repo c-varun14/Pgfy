@@ -16,7 +16,7 @@ test.describe("host status", () => {
   test("low disk, an expiring certificate and a failed delivery are called out", async ({ page, request }) => {
     await request.put("/api/v1/__mock/host", { data: { scenario: "low-disk" } });
     await page.goto("/settings");
-    await expect(page.getByText("Needs attention")).toBeVisible();
+    await expect(page.getByText("Needs attention", { exact: true })).toBeVisible();
     await expect(page.getByText("Low", { exact: true }).first()).toBeVisible();
     await request.put("/api/v1/__mock/host", { data: { scenario: "expiring" } });
     await page.reload();
@@ -31,5 +31,21 @@ test.describe("host status", () => {
     await request.put("/api/v1/__mock/host", { data: { scenario: "missing" } });
     await page.reload();
     await expect(page.getByText("The host has not reported disk and clock status")).toBeVisible();
+  });
+});
+
+test.describe("alerts", () => {
+  test("a webhook is saved, never shown back in full, and can be tested", async ({ page }) => {
+    await page.goto("/settings");
+    const card = page.locator("section.card").filter({ has: page.getByRole("heading", { name: "Alerts", exact: true }) });
+    await expect(card.getByText("The newest recoverable backup of shop is older than its target")).toBeVisible();
+    await card.getByLabel("Webhook URL").fill("http://hooks.example.com/services/T0KEN");
+    await card.getByRole("button", { name: "Save" }).click();
+    await expect(card.getByText("the webhook must use https")).toBeVisible();
+    await card.getByLabel("Webhook URL").fill("https://hooks.example.com/services/T0KEN");
+    await card.getByRole("button", { name: "Save" }).click();
+    await expect(card.getByLabel("Webhook URL")).toHaveValue("https://hooks.example.com/…");
+    await card.getByRole("button", { name: "Send test alert" }).click();
+    await expect(card.getByText("Test alert delivered.")).toBeVisible();
   });
 });

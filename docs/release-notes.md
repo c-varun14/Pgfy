@@ -1,5 +1,14 @@
 # Release notes
 
+## Unreleased — alerts (`mvp-to-production`)
+
+- One generic JSON webhook (Settings → Alerts), sealed, with a test button and optional HMAC signing. It covers failing
+  and late backups, interrupted jobs, PostgreSQL unreachable for five minutes, low disk, a silent host report, clock
+  drift, certificate expiry and delivery failures, connection pressure, manifests without archives, and password
+  changes. Each condition fires at most once a day and sends a resolved message after staying clear for ten minutes;
+  conditions that cannot be checked are never reported resolved.
+- Slack incoming webhooks work without an adapter; Discord via its `/slack` URL.
+
 ## Unreleased — host status and upkeep (`mvp-to-production`)
 
 - `pgfy-host-status.timer` records free disk (PostgreSQL volume, backup workspace, `/`) and clock synchronisation every

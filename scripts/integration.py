@@ -4,6 +4,8 @@
 Only resources bearing a fresh pgfy_test_* identity are created and removed.
 Run after scripts/build-image.py. Public ports are never opened by this fixture.
 """
+import hashlib
+import hmac
 import http.cookiejar
 import importlib.util
 import json
@@ -653,6 +655,43 @@ def main():
             assert all(d.get("error") or d["free_percent"] > 0 for d in reported["disks"]), reported
             assert reported["certificate"]["state"] == "not_used", reported
             passed("host status written by the host timer's command is read by the application")
+            # --- Alerts to a webhook receiver on the proxy network (reached like MinIO, as a private endpoint) ---
+            sink_name = project.replace("_", "-") + "-sink"
+            receiver = r"""use IO::Socket::INET; $|=1;
+my $s = IO::Socket::INET->new(LocalPort => 8080, Listen => 5, ReuseAddr => 1) or die;
+while (my $c = $s->accept) { my ($len, $sig, $ts) = (0, "", "");
+  while (my $l = <$c>) { $l =~ s/\r?\n$//; last if $l eq ""; $len = $1 if $l =~ /^Content-Length:\s*(\d+)/i; $sig = $1 if $l =~ /^X-Pgfy-Signature:\s*(\S+)/i; $ts = $1 if $l =~ /^X-Pgfy-Timestamp:\s*(\S+)/i; }
+  my $b = ""; read($c, $b, $len) if $len; print "$sig\t$ts\t$b\n";
+  print $c "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"; close $c; }"""
+            run(["docker", "run", "-d", "--name", sink_name, "--network", project + "_proxy", "--entrypoint", "perl", images["postgres"], "-e", receiver])
+            hook_secret = "integration-signing-secret"
+            code, session = request("/api/v1/auth/session")  # earlier phases signed in again
+            assert code == 200, session
+            code, saved = request("/api/v1/settings/alerts", {"url": f"http://{sink_name}:8080/hooks/T0KEN", "secret": hook_secret, "private_endpoint": True}, session["csrf_token"], "PUT")
+            assert code == 200 and saved["configured"] and "T0KEN" not in json.dumps(saved), (code, saved)
+            for _ in range(15):  # the receiver may still be starting
+                code, tested = request("/api/v1/settings/alerts/test", {}, session["csrf_token"])
+                if code == 200 and tested["ok"]:
+                    break
+                time.sleep(1)
+            assert code == 200 and tested["ok"], tested
+            def deliveries():
+                out = []
+                for line in run(["docker", "logs", sink_name]).stdout.splitlines():
+                    signature, timestamp, body = line.split("\t", 2)
+                    expected = "sha256=" + hmac.new(hook_secret.encode(), (timestamp + "." + body).encode(), hashlib.sha256).hexdigest()
+                    assert signature == expected, "a delivery was not signed with the configured secret"
+                    out.append(json.loads(body))
+                return out
+            # The password change earlier in this run was queued as an event and is delivered now that a receiver exists.
+            deadline = time.monotonic() + 90
+            while not any(d["kind"] == "credential_rotated" for d in deliveries()):
+                assert time.monotonic() < deadline, deliveries()
+                time.sleep(2)
+            assert any(d["kind"] == "test" for d in deliveries())
+            assert all(d["installation_id"] == identifier and "T0KEN" not in json.dumps(d) for d in deliveries())
+            assert "T0KEN" not in compose("logs", "--no-color", "application").stdout
+            passed("alerts reach a signed webhook: a test message and the queued password-change event")
             next_image = os.environ.get("PGFY_TEST_NEXT_IMAGE")
             if next_image:
                 update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed)
@@ -668,7 +707,7 @@ def main():
         finally:
             # These resources are generated test artifacts, not installation data.
             subprocess.run([*base, "-f", ROOT / "deploy/compose.tunnel.yaml", "down", "--volumes", "--remove-orphans"], capture_output=True, timeout=90)
-            subprocess.run(["docker", "rm", "-f", project.replace("_", "-") + "-minio"], capture_output=True, timeout=60)
+            subprocess.run(["docker", "rm", "-f", project.replace("_", "-") + "-minio", project.replace("_", "-") + "-sink"], capture_output=True, timeout=60)
             run([*helper, f"chown -R {os.getuid()}:{os.getgid()} /fixture; chmod -R u+rwX /fixture"])
 
 if __name__ == "__main__":

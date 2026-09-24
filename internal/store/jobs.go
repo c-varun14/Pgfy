@@ -208,6 +208,10 @@ func (s *Store) InterruptRunningJobs(ctx context.Context, now time.Time, interva
 		if _, e = tx.ExecContext(ctx, "UPDATE jobs SET state='interrupted', error='The application restarted before this job finished.', finished_at=? WHERE id=?", now.Unix(), j.ID); e != nil {
 			return nil, e
 		}
+		// Recorded with the interruption itself, so a crash cannot lose the alert.
+		if e = RecordAlertEvent(ctx, tx, "job_interrupted", "job_interrupted:"+j.ID, "A "+j.Kind+" was interrupted by an application restart", "Job "+j.ID+" stopped at stage "+j.Stage+"; it was not completed.", now); e != nil {
+			return nil, e
+		}
 		if j.Kind == "backup" && j.Scheduled && j.ProjectID != "" {
 			if e = recordOutcome(ctx, tx, j.ProjectID, false, now, interval); e != nil {
 				return nil, e

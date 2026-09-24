@@ -123,6 +123,7 @@ func (s *Server) connectionBudget(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "postgres_unavailable", "Connection use could not be read from PostgreSQL.")
 		return
 	}
+	global, _ := b.Warnings()
 	names := map[string]string{}
 	if projects, e := s.Store.Projects(r.Context()); e == nil {
 		for _, p := range projects {
@@ -138,7 +139,7 @@ func (s *Server) connectionBudget(w http.ResponseWriter, r *http.Request) {
 		out := []roleView{}
 		for _, u := range list {
 			// Warn at 80% of a role's own limit; -1 is unlimited.
-			out = append(out, roleView{RoleUse: u, Project: names[u.Role], Warning: u.Limit > 0 && u.Connections*5 >= u.Limit*4})
+			out = append(out, roleView{RoleUse: u, Project: names[u.Role], Warning: postgres.NearLimit(u.Connections, u.Limit)})
 		}
 		return out
 	}
@@ -146,7 +147,7 @@ func (s *Server) connectionBudget(w http.ResponseWriter, r *http.Request) {
 		"max_connections": b.MaxConnections, "superuser_reserved": b.SuperuserReserved, "reserved": b.Reserved,
 		"available": b.Available, "projects_used": b.ProjectsUsed, "projects_limit": b.ProjectsLimit, "other_used": b.OtherUsed,
 		// Project roles compete for the ordinary slots; the system roles can use the reserved ones.
-		"warning":       b.Available > 0 && b.ProjectsUsed*5 >= b.Available*4,
+		"warning":       global,
 		"overcommitted": b.ProjectsLimit > b.Available,
 		"roles":         view(b.Roles),
 		"system":        view(b.System),

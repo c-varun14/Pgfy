@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, type BackupPolicy, type ConnectionBudget, type HostStatus, type RoleUse, type Settings, type Status } from "../api";
+import { api, type Alerts, type AlertSettings, type BackupPolicy, type ConnectionBudget, type HostStatus, type RoleUse, type Settings, type Status } from "../api";
+import { Button } from "../components/ui/button";
 import { formatBytes, formatDate, relativeTime } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
 import { Banner } from "../components/ui/banner";
@@ -78,6 +79,31 @@ function HostCard({ host }: { host?: HostStatus }) {
   </Card>;
 }
 
+/** One generic JSON webhook. The URL is often the credential, so only its host is ever shown back. */
+function AlertsCard() {
+  const [settings, setSettings] = useState<AlertSettings | null>(null); const [alerts, setAlerts] = useState<Alerts | null>(null);
+  const [url, setUrl] = useState(""); const [secret, setSecret] = useState(""); const [privateEndpoint, setPrivate] = useState(false);
+  const [busy, setBusy] = useState(false); const [testing, setTesting] = useState(false); const [error, setError] = useState(""); const [result, setResult] = useState(""); const { showToast } = useToast();
+  async function load() { try { const [next, list] = await Promise.all([api<AlertSettings>("/settings/alerts"), api<Alerts>("/alerts")]); setSettings(next); setAlerts(list); setUrl(next.url); setPrivate(next.private_endpoint); } catch (failure) { setError((failure as Error).message); } }
+  useEffect(() => { void load(); const timer = setInterval(() => void api<Alerts>("/alerts").then(setAlerts).catch(() => undefined), 30000); return () => clearInterval(timer); }, []);
+  async function save(event: React.FormEvent) { event.preventDefault(); setBusy(true); setError(""); setResult(""); try { const next = await api<AlertSettings>("/settings/alerts", { method: "PUT", body: JSON.stringify({ url, secret, private_endpoint: privateEndpoint }) }); setSettings(next); setUrl(next.url); setSecret(""); showToast(next.configured ? "Alerts saved" : "Alerts turned off"); } catch (failure) { setError((failure as Error).message); } finally { setBusy(false); } }
+  async function test() { setTesting(true); setResult(""); setError(""); try { const outcome = await api<{ ok: boolean; error?: string }>("/settings/alerts/test", { method: "POST", body: "{}" }); if (outcome.ok) setResult("Test alert delivered."); else setError(`The test alert was not delivered: ${outcome.error}`); } catch (failure) { setError((failure as Error).message); } finally { setTesting(false); } }
+  const active = alerts?.conditions.filter((c) => c.active) || [];
+  return <Card><CardHeader title="Alerts" aside={settings && <Pill tone={settings.configured ? "good" : "neutral"}>{settings.configured ? "Webhook set" : "Off"}</Pill>} />
+    <p className="caption">Pgfy posts JSON to one webhook when backups fail or fall behind, PostgreSQL is unreachable for five minutes, disk runs low, the clock drifts, the certificate is expiring or was not delivered, connections reach 80%, a job is interrupted, or a password is changed. Each condition is sent at most once a day and followed by a resolved message.</p>
+    <form className="dialog-form" onSubmit={(event) => void save(event)}>
+      <label className="field"><span>Webhook URL</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://hooks.example.com/…" aria-label="Webhook URL" /><small className="caption">Leave empty to turn alerts off. Slack incoming webhooks work as they are; for Discord add <code>/slack</code> to its webhook URL.</small></label>
+      <label className="field"><span>Signing secret (optional)</span><input type="password" value={secret} onChange={(event) => setSecret(event.target.value)} placeholder={settings?.has_secret ? "Stored — leave empty to keep it" : "Signs each delivery with HMAC-SHA256"} aria-label="Signing secret" autoComplete="off" /></label>
+      <label className="checkbox"><input type="checkbox" checked={privateEndpoint} onChange={(event) => setPrivate(event.target.checked)} /> The receiver is on this machine or a private network (allows plain HTTP)</label>
+      {error && <ErrorNotice message={error} />}{result && <Banner>{result}</Banner>}
+      <div className="actions"><Button type="submit" loading={busy}>{busy ? "Saving…" : "Save"}</Button><Button type="button" variant="secondary" loading={testing} disabled={!settings?.configured} onClick={() => void test()}>Send test alert</Button></div>
+    </form>
+    <h3 className="subheading">Needs attention now</h3>
+    {alerts ? active.length === 0 ? <p className="caption">Nothing needs attention.</p> : <ul className="alert-list">{active.map((c) => <li key={c.key}><strong>{c.summary}</strong><span className="caption"> — since {relativeTime(c.first_seen_at)}. {c.detail}</span></li>)}</ul> : <p>Loading…</p>}
+    {alerts?.delivery.last_error && <p className="caption warn-text">Last delivery failed: {alerts.delivery.last_error}</p>}
+  </Card>;
+}
+
 function friendlyName(key: string) { return key === "application" ? "Pgfy" : key.replaceAll("_", " ").replace(/\b\w/g, (value) => value.toUpperCase()); }
 export function SettingsPage({ settings, status }: { settings: Settings; status: Status | null }) {
   const access = status?.database_access; const certificate = access?.certificate; const hostCert = status?.host?.certificate; const { theme, setTheme } = useTheme();
@@ -101,6 +127,7 @@ export function SettingsPage({ settings, status }: { settings: Settings; status:
     <HostCard host={status?.host} />
     <BackupsCard />
     <ConnectionsCard />
+    <AlertsCard />
     <Card><CardHeader title="Appearance" /><SegmentedControl value={theme} options={themeOptions} onChange={setTheme} label="Theme" /></Card>
     <details className="components-details"><summary>Components</summary><Card><DetailsList items={[
       { label: "Caddy", value: settings.caddy_version }, { label: "Docker", value: settings.docker_version }, { label: "Compose", value: settings.compose_version },
