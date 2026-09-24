@@ -47,6 +47,7 @@ type Server struct {
 	Alerts       *alerts.Engine
 	Now          func() time.Time
 	limiter      rateLimit
+	codeLimiter  rateLimit
 	hashSlots    chan struct{}
 }
 type bucket struct {
@@ -88,12 +89,7 @@ func (l *rateLimit) allow(key string, now time.Time) bool {
 func (s *Server) scope() string {
 	return s.Config.ID + ":" + s.Config.Mode + ":" + s.Config.Generation + ":" + s.Config.Origin
 }
-func (s *Server) cookieName() string {
-	if s.Config.Mode == "https" {
-		return "__Host-pgfy_session"
-	}
-	return "pgfy_tunnel_session"
-}
+func (s *Server) cookieName() string { return s.cookie("session") }
 func (s *Server) Handler() http.Handler {
 	if s.Now == nil {
 		s.Now = time.Now
@@ -106,6 +102,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
+	mux.HandleFunc("POST /api/v1/auth/code", s.confirmCode)
+	mux.HandleFunc("GET /api/v1/auth/enrol", s.currentEnrolment)
+	mux.HandleFunc("POST /api/v1/auth/enrol/confirm", s.confirmEnrolment)
+	mux.HandleFunc("POST /api/v1/auth/reset", s.startReset)
+	mux.HandleFunc("POST /api/v1/auth/abandon", s.abandon)
 	mux.HandleFunc("GET /api/v1/auth/session", s.session)
 	mux.HandleFunc("GET /api/v1/system/status", s.status)
 	mux.HandleFunc("GET /api/v1/settings", s.settings)
@@ -188,7 +189,10 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Signing in and out stays possible while an update holds the installation quiet.
-var maintenanceExempt = map[string]bool{"/api/v1/setup": true, "/api/v1/auth/login": true, "/api/v1/auth/logout": true}
+// Resets are not exempt: a rollback would bring the old credentials back. A
+// reset-kind enrolment confirmation is refused inside its own transaction.
+var maintenanceExempt = map[string]bool{"/api/v1/setup": true, "/api/v1/auth/login": true, "/api/v1/auth/logout": true,
+	"/api/v1/auth/code": true, "/api/v1/auth/enrol/confirm": true, "/api/v1/auth/abandon": true}
 
 type baseContextKey struct{}
 
@@ -308,6 +312,13 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		failure(w, 400, "invalid_password", e.Error())
 		return
 	}
+	if s.Config.Mode == "https" {
+		// A public dashboard never has an administrator without a second factor.
+		s.startEnrolment(w, r, store.Enrolment{Kind: "setup", Email: email, PasswordHash: hash}, func(enrolHash, sealed string) error {
+			return s.Store.BeginEnrolment(r.Context(), in.Token, enrolHash, sealed, s.Now())
+		})
+		return
+	}
 	token := security.Token()
 	e = s.Store.Setup(r.Context(), in.Token, email, hash, security.Hash(token), s.scope(), s.Now())
 	if errors.Is(e, store.ErrSetup) {
@@ -343,6 +354,34 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	valid := security.VerifyPassword(hash, in.Password)
 	if e != nil || !valid {
 		failure(w, 401, "invalid_credentials", "Email or password is incorrect.")
+		return
+	}
+	enrolled, current, e := s.Store.Factor(r.Context())
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Management storage is unavailable.")
+		return
+	}
+	if current != hash {
+		// The password changed (a reset completed) while this one was being checked.
+		failure(w, 401, "invalid_credentials", "Email or password is incorrect.")
+		return
+	}
+	if enrolled {
+		// The password step alone is not a session: a code must follow.
+		pending := security.Token()
+		if e = s.Store.BeginPending(r.Context(), security.Hash(pending), current, s.scope(), s.Now()); e != nil {
+			failure(w, 503, "metadata_unavailable", "Sign-in could not be saved.")
+			return
+		}
+		s.setStepCookie(w, "pending", pending, 5*time.Minute)
+		write(w, 200, map[string]any{"next": "code", "server_time": s.Now().Unix()})
+		return
+	}
+	if s.Config.Mode == "https" {
+		// An administrator from before second factors enrols one now, bound to this password step.
+		s.startEnrolment(w, r, store.Enrolment{Kind: "upgrade", Email: email, Binding: security.Hash(current)}, func(enrolHash, sealed string) error {
+			return s.Store.BeginUpgrade(r.Context(), enrolHash, sealed, s.Now())
+		})
 		return
 	}
 	token := security.Token()
@@ -392,7 +431,10 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metadata_unavailable", "Logout could not be saved. Try again.")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: s.cookieName(), Value: "", Path: "/", HttpOnly: true, Secure: s.Config.Mode == "https", SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	s.abandonSteps(r)
+	for _, kind := range []string{"session", "pending", "enrol"} {
+		s.clearCookie(w, kind)
+	}
 	w.WriteHeader(204)
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {

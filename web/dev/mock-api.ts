@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 const now = () => Math.floor(Date.now() / 1000);
 const direct = process.env.VITE_MOCK_MODE !== "tunnel";
 let signedIn = true;
+let enrolling = false;
 let storageConfigured = process.env.VITE_MOCK_STORAGE !== "0";
 let storage = { endpoint: "https://s3.us-east-1.amazonaws.com", region: "us-east-1", bucket: "pgfy-demo-backups", prefix: "pgfy", access_key: "••••••••", secret_key: "••••••••", session_token: "", path_style: false, private_endpoint: false, bucket_protection: "versioning", protection_state: "enabled", protection_checked_at: now() };
 let policy = { target_interval_hours: 24, retention_daily: 14, retention_weekly: 8, updated_at: now() };
@@ -78,8 +79,15 @@ export function mockApi(): Plugin {
   return { name: "pgfy-mock-api", configureServer(server) { server.middlewares.use("/api/v1", async (req, res) => {
     const path = (req.url || "/").split("?")[0]; const method = req.method || "GET";
     if (path === "/__mock/host" && method === "PUT") { hostScenario = String((await body(req) as { scenario?: string }).scenario || "ok"); return send(res, 204); }
-    if (path === "/setup" && method === "GET") return send(res, 200, { available: true });
-    if ((path === "/setup" || path === "/auth/login") && method === "POST") { signedIn = true; return send(res, 204); }
+    if (path === "/setup" && method === "GET") return send(res, 200, { available: process.env.VITE_MOCK_SETUP === "1" });
+    // Sign-in steps as in HTTPS mode: a code from the enrolled factor; the mock's valid code is 123456.
+    const enrolView = { next: "enrol", key: "JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP", account: "admin@example.com", issuer: "Pgfy", server_time: now() };
+    if (path === "/setup" && method === "POST") { enrolling = true; return send(res, 200, enrolView); }
+    if (path === "/auth/login" && method === "POST") { const input = await body(req) as { password?: string }; if (input.password !== "a sufficiently long passphrase") return failure(res, 401, "invalid_credentials", "Email or password is incorrect."); return send(res, 200, { next: "code", server_time: now() }); }
+    if (path === "/auth/reset" && method === "POST") { enrolling = true; return send(res, 200, enrolView); }
+    if (path === "/auth/abandon" && method === "POST") { enrolling = false; return send(res, 204); }
+    if (path === "/auth/enrol" && method === "GET") return enrolling ? send(res, 200, enrolView) : failure(res, 401, "enrol_expired", "No setup step is in progress.");
+    if ((path === "/auth/code" || path === "/auth/enrol/confirm") && method === "POST") { const input = await body(req) as { code?: string }; if (input.code !== "123456") return failure(res, 401, "invalid_code", "That code is not right. Check the time on your device and try the current code."); signedIn = true; enrolling = false; return send(res, 200, { email: "admin@example.com", csrf_token: "mock-csrf" }); }
     if (path === "/auth/logout" && method === "POST") { signedIn = false; return send(res, 204); }
     if (path === "/auth/session") return signedIn ? send(res, 200, { email: "admin@example.com", expires_at: now() + 86400, csrf_token: "mock-csrf", client_ip: "198.51.100.18" }) : failure(res, 401, "unauthorized", "Sign in to continue.");
     if (!signedIn) return failure(res, 401, "unauthorized", "Sign in to continue.");

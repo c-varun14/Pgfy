@@ -181,66 +181,6 @@ func (s *Store) SetupAvailable(ctx context.Context) (bool, error) {
 	e := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM administrator").Scan(&n)
 	return n == 0, e
 }
-func (s *Store) NewSetupToken(ctx context.Context, now time.Time) (string, error) {
-	token := security.Token()
-	tx, e := s.DB.BeginTx(ctx, nil)
-	if e != nil {
-		return "", e
-	}
-	defer tx.Rollback()
-	// Take the write lock before inspecting administrator/token state.
-	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO metadata(key,value) VALUES ('setup_lock','1')"); e != nil {
-		return "", e
-	}
-	var n int
-	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM administrator").Scan(&n); e != nil {
-		return "", e
-	}
-	if n != 0 {
-		return "", ErrSetup
-	}
-	var expires int64
-	e = tx.QueryRowContext(ctx, "SELECT expires_at FROM setup_token WHERE id=1").Scan(&expires)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		return "", e
-	}
-	if e == nil && expires > now.Unix() {
-		return "", ErrTokenActive
-	}
-	_, e = tx.ExecContext(ctx, "INSERT INTO setup_token(id,token_hash,expires_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at", security.Hash(token), now.Add(30*time.Minute).Unix())
-	if e != nil {
-		return "", e
-	}
-	if e = tx.Commit(); e != nil {
-		return "", e
-	}
-	return token, nil
-}
-func (s *Store) Setup(ctx context.Context, token, email, passwordHash, sessionHash, scope string, now time.Time) error {
-	tx, e := s.DB.BeginTx(ctx, nil)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
-	res, e := tx.ExecContext(ctx, "DELETE FROM setup_token WHERE id=1 AND token_hash=? AND expires_at>? AND NOT EXISTS(SELECT 1 FROM administrator)", security.Hash(token), now.Unix())
-	if e != nil {
-		return e
-	}
-	n, e := res.RowsAffected()
-	if e != nil {
-		return e
-	}
-	if n != 1 {
-		return ErrSetup
-	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO administrator(id,email,password_hash,created_at) VALUES (1,?,?,?)", email, passwordHash, now.Unix()); e != nil {
-		return e
-	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO sessions(token_hash,admin_id,scope,expires_at) VALUES (?,1,?,?)", sessionHash, scope, now.Add(12*time.Hour).Unix()); e != nil {
-		return e
-	}
-	return tx.Commit()
-}
 func (s *Store) Password(ctx context.Context, email string) (string, error) {
 	var hash string
 	e := s.DB.QueryRowContext(ctx, "SELECT password_hash FROM administrator WHERE email=?", email).Scan(&hash)

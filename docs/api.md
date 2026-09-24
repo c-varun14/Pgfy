@@ -5,8 +5,12 @@ All application endpoints use JSON under `/api/v1`. Responses containing authent
 | Method/path | Request | Response / authorization |
 | --- | --- | --- |
 | `GET /api/v1/setup` | — | `{available: boolean}`; no token is returned |
-| `POST /api/v1/setup` | `{token, email, password}` | 201, session cookie, `{email, csrf_token}` |
-| `POST /api/v1/auth/login` | `{email, password}` | 200, session cookie, `{email, csrf_token}` |
+| `POST /api/v1/setup` | `{token, email, password}` | HTTPS mode: 200 `{next: "enrol", key, account, issuer, algorithm, digits, period, server_time}` and an enrolment cookie; no administrator exists until confirmed. Tunnel mode: 201, session cookie, `{email, csrf_token}` |
+| `POST /api/v1/auth/login` | `{email, password}` | With a factor: 200 `{next: "code", server_time}` and a pending cookie (5 minutes), no session. Without one in HTTPS mode: 200 `{next: "enrol", …}`. Without one in tunnel mode: 200, session cookie, `{email, csrf_token}` |
+| `POST /api/v1/auth/code` | `{code}` | 200, session cookie, `{email, csrf_token}`; 401 `invalid_code`, `code_reused` or `code_expired`; 429 `code_locked` after repeated wrong codes. Its own rate limit; no password hashing |
+| `GET /api/v1/auth/enrol` | Enrolment cookie | The key again while the enrolment (10 minutes, 5 attempts) is live |
+| `POST /api/v1/auth/enrol/confirm` | `{code}` | 200, session cookie, `{email, csrf_token}`; completes setup, a reset or a first enrolment in one transaction |
+| `POST /api/v1/auth/reset` | `{token, password}` | 200 `{next: "enrol", …}` with a token from `pgfyctl reset-admin`; nothing changes until confirmed; 503 during an update |
 | `POST /api/v1/auth/logout` | `{}` plus `X-CSRF-Token` | 204, session revoked, cookie cleared |
 | `GET /api/v1/auth/session` | Session cookie | `{email, expires_at, csrf_token, client_ip}` |
 | `GET /api/v1/system/status` | Session cookie | `ready`, `maintenance`, `host` (`state` ok/stale/unknown, `written_at`, `disks[]` with `free_percent` and `low` under 15%, `ntp_synchronized`, `certificate` with `expires_at` from the served certificate, `expiring` within 14 days and `last_sync`), SQLite/PostgreSQL states and versions, app/tool versions, backup state, `database_access` |
@@ -78,8 +82,10 @@ Restores always create a new project: download, SHA-256 verification, PostgreSQL
 
 There are no APIs for domain changes, cutover confirmation, Caddy administration, public account recovery, or signup after initial setup.
 
-While `pgfyctl update` holds the installation paused (`maintenance: true` in the status), every non-GET API request except setup, sign-in and sign-out returns `503` with code `maintenance`, no job starts, provisioning waits, and reconciliation reads the bucket without deleting anything.
+While `pgfyctl update` holds the installation paused (`maintenance: true` in the status), every non-GET API request except setup, sign-in (password and code steps, enrolment confirmation) and sign-out returns `503` with code `maintenance`, no job starts, provisioning waits, and reconciliation reads the bucket without deleting anything.
 
 ## Audit
 
-Administrative actions are recorded in an append-only `audit` table in SQLite (time, administrator, action, target, request ID and a short detail that never contains a secret): `credentials.rotate`, `access.update`, `writes.freeze`, `writes.resume`, `limits.update`, `settings.storage` and `settings.backups`. The rotation row commits in the same transaction as the new password; the others are written after their change commits. Updates and deletes are refused by the database. There is no audit view yet.
+Sign-in cookies (`session`, `pending`, `enrol`) are `__Host-` prefixed and Secure in HTTPS mode, host-only in tunnel mode, always HttpOnly and SameSite=Strict. Setup, reset, enrolment and pending tokens live in one `auth_tokens` table as hashes with an expiry and an attempt limit enforced inside the verifying transaction.
+
+Administrative actions are recorded in an append-only `audit` table in SQLite (time, administrator, action, target, request ID and a short detail that never contains a secret): `credentials.rotate`, `access.update`, `writes.freeze`, `writes.resume`, `limits.update`, `settings.storage`, `settings.backups`, `settings.alerts`, `auth.second_factor` and `auth.reset`. The rotation row commits in the same transaction as the new password; the others are written after their change commits. Updates and deletes are refused by the database. There is no audit view yet.

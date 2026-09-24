@@ -64,6 +64,11 @@ notices when the whole host is down.
 - Dashboard certificate or hostname broken: from SSH, `sudo pgfyctl tunnel`, then `ssh -L 8080:127.0.0.1:8080 …` and
   open `http://127.0.0.1:8080`. Return with `sudo pgfyctl hostname <name>`.
 - Setup not finished and the token expired: `sudo pgfyctl setup-token`.
+- Lost the authenticator app or the password: `sudo pgfyctl reset-admin`, then "Reset access" on the sign-in page. It
+  replaces both the password and the second factor and signs out every session. This is also how a tunnel-mode
+  installation gets a second factor.
+- A first enrolment (setup, or an existing administrator's first HTTPS sign-in) completed while an update was running
+  is undone if that update rolls back; remove the entry from the authenticator app and enrol again at the next sign-in.
 - An update was interrupted: `sudo pgfyctl rollback-update`. Backups left paused: `sudo pgfyctl maintenance off`.
 
 ## Retiring a database (until deletion exists)

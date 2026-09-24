@@ -62,7 +62,7 @@ func TestSetupAtomicAcrossConnections(t *testing.T) {
 	if count != 1 {
 		t.Fatal(count)
 	}
-	s.DB.QueryRow("SELECT count(*) FROM setup_token").Scan(&count)
+	s.DB.QueryRow("SELECT count(*) FROM auth_tokens WHERE purpose='setup' AND consumed_at IS NULL").Scan(&count)
 	if count != 0 {
 		t.Fatal("token not consumed")
 	}

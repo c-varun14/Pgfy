@@ -186,7 +186,7 @@ func TestHTTPSCookieAndNoTokenLeak(t *testing.T) {
 	f.s.Config.Mode = "tunnel"
 	f.s.Config.Origin = "http://127.0.0.1:8080"
 	f.setup(t)
-	for _, table := range []string{"setup_token", "sessions"} {
+	for _, table := range []string{"auth_tokens", "sessions"} {
 		var n int
 		query := "SELECT count(*) FROM " + table + " WHERE token_hash=?"
 		if e := f.s.Store.DB.QueryRow(query, f.token).Scan(&n); e != nil {

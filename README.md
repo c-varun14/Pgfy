@@ -10,7 +10,7 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 
 ## Implemented
 
-- One-command install with HTTPS-first dashboard access, single-admin setup, sessions, CSRF, rate limits.
+- One-command install with HTTPS-first dashboard access, single-admin setup with a mandatory authenticator-app second factor over HTTPS, an SSH-issued access reset, sessions, CSRF, rate limits.
 - Projects: one name creates a database, a restricted role and a strong password; resumable provisioning with honest failure states and retry.
 - Connection details with `sslmode=verify-full`, driver snippets, an SSH-tunnel path, and an observed connection check from the application environment.
 - Freeze writes per project (reads continue, writes are rejected, sessions reconnect read-only) so a backup taken before moving a database is complete.
@@ -25,7 +25,7 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 
 ## Planned, not implemented
 
-- A second factor for the dashboard, host-side admin reset, project deletion, and the other items in the post-hackathon
+- Project deletion, and the other items in the post-hackathon
   [production-readiness roadmap](docs/phases.md#phase-6--post-demo-hardening-and-operation) (Phase 6). That work happens on the
   `mvp-to-production` branch; `main` is the hackathon submission.
 - The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.

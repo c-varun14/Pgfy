@@ -1111,6 +1111,7 @@ def main():
     modes.add_argument("--tunnel", action="store_true")
     sub.add_parser("diagnostics")
     sub.add_parser("setup-token")
+    sub.add_parser("reset-admin", help="issue a one-use token to reset the administrator's password and second factor")
     hostname_parser = sub.add_parser("hostname")
     hostname_parser.add_argument("hostname")
     sub.add_parser("tunnel")
@@ -1158,6 +1159,13 @@ def main():
                     if result.returncode:
                         raise InstallError("Token replacement rejected: setup may already be complete, the existing token may still be valid, or SQLite may be unavailable. Replacement is allowed only before setup and after token expiry.")
                     print("Setup token (expires in 30 minutes):\n" + result.stdout.strip())
+                elif args.command == "reset-admin":
+                    result = installation.compose("exec", "-T", "application", "pgfy", "reset-admin", check=False)
+                    if result.returncode:
+                        raise InstallError("Reset token not issued: setup may be unfinished (use pgfyctl setup-token) or management storage is unavailable.")
+                    print("Reset token (one use, expires in 30 minutes; enter it on the dashboard's \"Reset access\" page, never in a URL):\n" + result.stdout.strip())
+                    print("Completing the reset replaces the password and the second factor and signs out every session.")
+                    print("If the dashboard certificate is broken, run pgfyctl tunnel first and finish the reset over an SSH port-forward.")
                 elif args.command == "hostname":
                     change_access(installation, "https", args.hostname)
                 elif args.command == "tunnel":

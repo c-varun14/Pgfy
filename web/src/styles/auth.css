@@ -71,3 +71,6 @@
 }
 @media (max-width: 400px) { .auth-topbar .segmented button { font-size: 0; gap: 0; min-width: 36px; min-height: 32px; } }
 @media (max-height: 760px) and (min-width: 761px) { .auth-pitch { margin-top: 40px; } .auth-sculpture { min-height: 190px; } .sculpture-mark { scale: .8; height: 190px; } .sculpture-caption { display: none; } }
+.auth-step-hint { font-size: 14px; color: var(--text-muted, inherit); margin: 0 0 14px; }
+.enrol-key { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; margin: 0 0 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--code-bg); }
+.enrol-key code { font-size: 17px; letter-spacing: 0.06em; word-break: break-all; color: var(--code-fg); }
