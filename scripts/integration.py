@@ -573,8 +573,9 @@ def main():
                 if any(name.startswith("pgfy-") and name.endswith(".db") for name in copies):
                     break
                 time.sleep(1)
+            assert any(name.startswith("pgfy-") and name.endswith(".db") for name in copies), ("no daily copy of management storage", copies)
             copy = next(name for name in copies if name.startswith("pgfy-") and name.endswith(".db"))
-            run(["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "10001:10001", "-v", f"{directory}/data/sqlite:/data", application_image, "store-restore", "--check", "/data/daily/" + copy])
+            run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", "10001:10001", "-v", f"{directory}/data/sqlite:/data", application_image, "store-restore", "--check", "/data/daily/" + copy])
             passed("the application keeps a daily copy of management storage that passes an integrity check")
             # Retention keeps the last day whole, then one backup per older day.
             # Older backups are made by copying one to an earlier timestamp, with

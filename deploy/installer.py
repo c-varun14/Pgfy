@@ -1097,7 +1097,8 @@ def export_recovery_kit(installation, out=None):
         store_file(root, installation.state["images"]["application"], "store-snapshot", "/data/" + KIT_SNAPSHOT)
         members = {"metadata.db": snapshot.read_bytes()}
     finally:
-        snapshot.unlink(missing_ok=True)
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            Path(str(snapshot) + suffix).unlink(missing_ok=True)
     for name in KIT_FILES:
         members[name] = (root / name).read_bytes()
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1115,14 +1116,23 @@ def export_recovery_kit(installation, out=None):
         descriptor = target.fileno()
     except (io.UnsupportedOperation, AttributeError, ValueError):
         descriptor = None
-    # A shell redirect creates the file with the operator's umask; the kit must not stay world-readable.
-    if descriptor is not None and stat.S_ISREG(os.fstat(descriptor).st_mode):
+    regular = descriptor is not None and stat.S_ISREG(os.fstat(descriptor).st_mode)
+    # Best effort: a shell redirect on this server creates the file with the operator's umask.
+    if regular:
         os.fchmod(descriptor, 0o600)
     try:
         target.write(buffer.getvalue())
         target.flush()
-    except BrokenPipeError as error:
-        raise InstallError("The kit could not be written: the output was closed.") from error
+    except OSError as error:
+        if regular:
+            # Never leave a truncated kit that looks like a kit.
+            os.ftruncate(descriptor, 0)
+        if isinstance(error, BrokenPipeError):
+            # Nothing more can reach the closed pipe, including Python's own flush at exit.
+            if descriptor is not None:
+                os.dup2(os.open(os.devnull, os.O_WRONLY), descriptor)
+            raise InstallError("The kit could not be written: the output was closed.") from error
+        raise InstallError(f"The kit could not be written ({error.strerror}); the output was emptied.") from error
     print(f"Recovery kit written: {len(members)} files. It contains secrets: keep it in your password manager and delete local copies.", file=sys.stderr)
 
 def diagnostics(installation):

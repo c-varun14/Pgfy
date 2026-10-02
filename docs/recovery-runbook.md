@@ -74,14 +74,17 @@ following. They are for a narrower case: a server whose PostgreSQL volume is int
   is running.
 - **Recovery kit.** `(umask 077; sudo /opt/firstcommit/pgfyctl export-recovery-kit > pgfy-kit.tar.gz)` writes the
   encryption key, the PostgreSQL passwords, `config/install.json`, `state.json` and a fresh copy of management storage
-  as a tar.gz (the file is made private even without the umask). From your own machine,
-  `ssh <server> sudo /opt/firstcommit/pgfyctl export-recovery-kit > pgfy-kit.tar.gz` takes it straight off the server.
+  as a tar.gz. Keep the `umask 077`: it is what makes the file private. From your own machine,
+  `(umask 077; ssh <server> sudo /opt/firstcommit/pgfyctl export-recovery-kit > pgfy-kit.tar.gz)` takes it straight off
+  the server; this needs sudo without a password prompt (do not use `ssh -t`: the kit is never written to a terminal).
   It is as sensitive as your bucket keys — the key opens the sealed bucket credentials, project passwords and second
   factor stored in the copy — so keep it in your password manager and delete other copies. Its `README.txt` lists
   where each file goes and with which owner and mode. `config/install.json` and `state.json` are a record only;
   never copy them over a newer installation.
 
-To put a copy back (the newest daily copy, or `metadata.db` from the kit):
+To put a copy back, choose the newest copy taken before the damage: list the daily copies with
+`sudo ls data/sqlite/daily`, or use `metadata.db` from the kit (copy the kit to the server and extract it with
+`(umask 077; tar -xzf pgfy-kit.tar.gz)`, then use `pgfy-recovery-kit/metadata.db` below):
 
 ```sh
 cd /opt/firstcommit
@@ -94,6 +97,7 @@ sudo rm -f data/sqlite/pgfy.db-wal data/sqlite/pgfy.db-shm
 sudo install -o 10001 -g 10001 -m 0600 data/sqlite/daily/pgfy-YYYYMMDD.db data/sqlite/pgfy.db
 # only if the key was lost too:  sudo install -o 10001 -g 10001 -m 0400 <kit>/secrets/encryption_key secrets/encryption_key
 compose start application
+sudo ./pgfyctl maintenance status   # a copy taken during an interrupted update may still pause backups: maintenance off
 ```
 
 A copy is a moment in time. Everything changed after it is undone in the dashboard, and some of it in PostgreSQL:
@@ -105,4 +109,4 @@ A copy is a moment in time. Everything changed after it is undone in the dashboa
 - Databases deleted after the copy reappear in the dashboard without a database behind them; delete them again.
 - A database that was still being set up resumes its setup.
 
-So use the newest copy you have, and check the list of databases right after starting.
+So use the newest copy taken before the damage, and check the list of databases right after starting.
