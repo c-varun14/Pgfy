@@ -147,6 +147,7 @@ The installation contains:
 | `config/` | Host-managed dashboard origin, Caddy configuration, PostgreSQL access policy (`pg/pg_hba.conf`), database TLS material (`postgres-tls/`) |
 | `config/pg/managed/` | Dashboard-written project access rules (`projects.conf`), included by the host policy; the only PostgreSQL configuration the app can write |
 | `data/sqlite/` | Administrator, hashed sessions/setup tokens, projects, sealed credentials, jobs, sealed storage settings, backup policy and the reconciled view of the bucket |
+| `data/sqlite/daily/` | One consistent copy of management storage per UTC day, the newest seven (owner `10001:10001`, files `0600`); same disk, see the [recovery runbook](recovery-runbook.md#recovery-kit-and-daily-metadata-copies) |
 | `data/work/` | Disk-backed workspace for backup/restore archives; emptied at application start |
 | `secrets/encryption_key` | Recoverable-secret encryption key, separately protected from SQLite |
 | `secrets/bootstrap_password` | PostgreSQL bootstrap credential, never mounted into the app |

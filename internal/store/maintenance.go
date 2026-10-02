@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 )
 
 // ErrMaintenance means a host-side update holds the installation quiet: no job
@@ -145,4 +147,47 @@ func syncFile(path string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// DailyCopies is how many daily copies of management storage are kept.
+const DailyCopies = 7
+
+// DailyCopy writes one consistent copy of management storage per UTC day into
+// dir and keeps the newest DailyCopies. The copies sit on the same disk: they
+// cover a damaged or mistakenly replaced database, not a lost server, which is
+// recovered from the bucket. Nothing is copied while an update holds the
+// installation quiet, so a rollback never leaves a copy of the newer schema.
+func DailyCopy(ctx context.Context, s *Store, source, dir string, now time.Time) (string, error) {
+	if on, e := s.Maintenance(ctx); e != nil || on {
+		return "", e
+	}
+	name := filepath.Join(dir, "pgfy-"+now.UTC().Format("20060102")+".db")
+	if _, e := os.Stat(name); e == nil {
+		return "", nil
+	}
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		return "", e
+	}
+	staged := name + ".tmp"
+	if e := Snapshot(ctx, source, staged); e != nil {
+		_ = os.Remove(staged)
+		return "", e
+	}
+	if e := os.Rename(staged, name); e != nil {
+		return "", e
+	}
+	if e := syncFile(dir); e != nil {
+		return "", e
+	}
+	// Pruned only after this copy is in place, so it is never the one removed.
+	copies, _ := filepath.Glob(filepath.Join(dir, "pgfy-*.db"))
+	sort.Strings(copies)
+	for i := 0; i < len(copies)-DailyCopies; i++ {
+		_ = os.Remove(copies[i])
+	}
+	stray, _ := filepath.Glob(filepath.Join(dir, "pgfy-*.db.tmp"))
+	for _, path := range stray {
+		_ = os.Remove(path)
+	}
+	return name, nil
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -239,6 +240,9 @@ func run() error {
 	if alerter != nil {
 		go alerter.Run(ctx)
 	}
+	if s != nil {
+		go dailyCopies(ctx, s, dbPath)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -251,6 +255,30 @@ func run() error {
 		return errors.New("HTTP server failed")
 	}
 	return nil
+}
+
+// dailyCopies keeps one copy of management storage per day beside it: a minute
+// after start, so a fresh container makes today's copy, then every hour.
+func dailyCopies(ctx context.Context, s *store.Store, dbPath string) {
+	dir := filepath.Join(filepath.Dir(dbPath), "daily")
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	first := time.After(time.Minute)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-first:
+		case <-ticker.C:
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		if name, e := store.DailyCopy(copyCtx, s, dbPath, dir, time.Now()); e != nil {
+			slog.Warn("daily copy of management storage failed", "reason", e.Error())
+		} else if name != "" {
+			slog.Info("daily copy of management storage written", "file", filepath.Base(name))
+		}
+		cancel()
+	}
 }
 
 // hostCommand serves the updater: it quiesces the installation and reports

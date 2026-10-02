@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -18,6 +19,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.request
@@ -1054,6 +1056,75 @@ def rollback_update(root, reason=None):
         return f"Update to {meta['to']} failed while {reason}. Restored {meta['from']}; it is ready. Sign in again."
     return f"Rolled back the interrupted update to {meta['to']}. Restored {meta['from']}; it is ready. Sign in again."
 
+KIT_SNAPSHOT = ".recovery-kit.db"  # inside data/sqlite, taken by the application image and removed afterwards
+KIT_FILES = ("secrets/encryption_key", "secrets/bootstrap_password", "secrets/health_password", "secrets/management_password", "config/install.json", "state.json")
+
+def kit_readme(installation, created):
+    cfg = installation.config()
+    return f"""Pgfy recovery kit
+Installation {cfg.get("id", "")}, release {installation.state.get("release", "")}, {cfg.get("mode", "")} {cfg.get("hostname", "")}
+Created {created}
+
+This kit is as sensitive as your bucket keys: the encryption key opens the sealed bucket
+credentials, project passwords and second-factor secret stored in metadata.db.
+
+A lost server is recovered from the bucket alone (docs/recovery-runbook.md); that path is
+tested and needs neither this kit nor SQLite. This kit is for a server whose PostgreSQL
+volume is intact but whose management storage or key was lost or damaged; see
+"Recovery kit and daily metadata copies" in the recovery runbook before using it.
+
+Files (the archive stores them all as root, 0600; put them back with these owners/modes):
+  metadata.db                   -> data/sqlite/pgfy.db          10001:10001 0600
+  secrets/encryption_key        -> secrets/encryption_key       10001:10001 0400
+  secrets/bootstrap_password    -> secrets/bootstrap_password   999:999     0400
+  secrets/health_password       -> secrets/health_password      10001:999   0440
+  secrets/management_password   -> secrets/management_password  10001:999   0440
+  config/install.json, state.json: a record of this installation only. Never copy them
+  over a newer installation; they pin the release, images and generation.
+"""
+
+def export_recovery_kit(installation, out=None):
+    """Write secrets, identity and a fresh copy of management storage as a tar.gz to stdout. Everything is read
+    before anything is written, so a failure never leaves a truncated kit that looks complete."""
+    out = out or sys.stdout
+    root = installation.root
+    if out.isatty():
+        raise InstallError("The kit contains secrets. Redirect it to a file or pipe, e.g. (umask 077; sudo pgfyctl export-recovery-kit > pgfy-kit.tar.gz).")
+    if (root / "update-rollback").exists():
+        raise InstallError("An earlier update did not finish. Finish or roll it back (pgfyctl rollback-update) first.")
+    snapshot = root / "data/sqlite" / KIT_SNAPSHOT
+    try:
+        store_file(root, installation.state["images"]["application"], "store-snapshot", "/data/" + KIT_SNAPSHOT)
+        members = {"metadata.db": snapshot.read_bytes()}
+    finally:
+        snapshot.unlink(missing_ok=True)
+    for name in KIT_FILES:
+        members[name] = (root / name).read_bytes()
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    members = {"README.txt": kit_readme(installation, created).encode(), **members}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo("pgfy-recovery-kit/" + name)
+            info.size, info.mode, info.mtime = len(data), 0o600, int(time.time())
+            info.uid = info.gid = 0
+            info.uname = info.gname = "root"
+            archive.addfile(info, io.BytesIO(data))
+    target = out.buffer
+    try:
+        descriptor = target.fileno()
+    except (io.UnsupportedOperation, AttributeError, ValueError):
+        descriptor = None
+    # A shell redirect creates the file with the operator's umask; the kit must not stay world-readable.
+    if descriptor is not None and stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.fchmod(descriptor, 0o600)
+    try:
+        target.write(buffer.getvalue())
+        target.flush()
+    except BrokenPipeError as error:
+        raise InstallError("The kit could not be written: the output was closed.") from error
+    print(f"Recovery kit written: {len(members)} files. It contains secrets: keep it in your password manager and delete local copies.", file=sys.stderr)
+
 def diagnostics(installation):
     cfg = installation.config()
     print(f"Release: {installation.state['release']}\nAccess: {cfg['mode']} {cfg['origin']}\nVolume prefix: {installation.state['volume_prefix']}")
@@ -1117,6 +1188,7 @@ def main():
     sub.add_parser("tunnel")
     sub.add_parser("rollback-hostname")
     sub.add_parser("sync-db-cert")
+    sub.add_parser("export-recovery-kit", help="write secrets, identity and a copy of management storage as a tar.gz to stdout")
     sub.add_parser("host-status", help="record disk and clock status for the dashboard (run by a timer)")
     update_parser = sub.add_parser("update", help="update to an extracted, newer release bundle")
     update_parser.add_argument("bundle")
@@ -1172,6 +1244,8 @@ def main():
                     change_access(installation, "tunnel")
                 elif args.command == "sync-db-cert":
                     sync_db_cert(installation)
+                elif args.command == "export-recovery-kit":
+                    export_recovery_kit(installation)
                 elif args.command == "maintenance":
                     running = app_status(installation) == "running"
                     result = app_command(installation, "maintenance", args.action, running=running)

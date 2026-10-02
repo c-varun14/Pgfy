@@ -522,3 +522,56 @@ class HostStatusTests(unittest.TestCase):
         with patch.object(installer, "atomic"), patch.object(installer, "run") as run:
             installer.converge_host(self.root, "https")
         self.assertIn(["systemctl", "enable", "--now", "pgfy-cert.timer"], [c.args[0] for c in run.call_args_list])
+
+class RecoveryKitTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name) / "install"
+        state = dict(TEST_STATE, stage="installed")
+        installer.json_write(self.root / "state.json", state)
+        installer.json_write(self.root / "config/install.json", {"id": "abc", "mode": "tunnel", "hostname": ""}, 0o644)
+        for name in ("encryption_key", "bootstrap_password", "health_password", "management_password"):
+            installer.atomic(self.root / "secrets" / name, "secret-" + name, 0o400)
+        (self.root / "data/sqlite").mkdir(parents=True)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def snapshot(self, root, image, *args):
+        (root / "data/sqlite" / installer.KIT_SNAPSHOT).write_bytes(b"sqlite-copy")
+
+    def export(self, out):
+        with patch.object(installer, "store_file", side_effect=self.snapshot):
+            installer.export_recovery_kit(installer.Installation(self.root), out)
+
+    def test_kit_is_complete_private_and_leaves_no_snapshot(self):
+        path = Path(self.directory.name) / "kit.tar.gz"
+        with open(path, "wb") as handle:
+            path.chmod(0o644)
+            self.export(SimpleNamespace(isatty=lambda: False, buffer=handle))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        import tarfile
+        with tarfile.open(path) as archive:
+            members = {m.name.split("/", 1)[1]: m for m in archive.getmembers()}
+            self.assertEqual(set(members), {"README.txt", "metadata.db", *installer.KIT_FILES})
+            self.assertTrue(all(m.mode == 0o600 and m.uid == 0 for m in members.values()))
+            self.assertEqual(archive.extractfile("pgfy-recovery-kit/metadata.db").read(), b"sqlite-copy")
+            self.assertIn(b"bucket", archive.extractfile("pgfy-recovery-kit/README.txt").read())
+        self.assertFalse((self.root / "data/sqlite" / installer.KIT_SNAPSHOT).exists())
+
+    def test_refuses_a_terminal_and_an_unfinished_update(self):
+        with self.assertRaises(installer.InstallError):
+            self.export(SimpleNamespace(isatty=lambda: True, buffer=None))
+        (self.root / "update-rollback").mkdir()
+        with self.assertRaises(installer.InstallError):
+            self.export(SimpleNamespace(isatty=lambda: False, buffer=None))
+
+    def test_snapshot_removed_when_writing_fails(self):
+        class Closed:
+            def fileno(self):
+                raise ValueError("no descriptor")
+            def write(self, data):
+                raise BrokenPipeError()
+        with self.assertRaises(installer.InstallError):
+            self.export(SimpleNamespace(isatty=lambda: False, buffer=Closed()))
+        self.assertFalse((self.root / "data/sqlite" / installer.KIT_SNAPSHOT).exists())
