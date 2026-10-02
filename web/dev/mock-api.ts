@@ -56,7 +56,7 @@ const jobs = new Map<string, MockJob>();
 function send(res: ServerResponse, status: number, body?: unknown) { res.statusCode = status; res.setHeader("Content-Type", "application/json"); res.end(body === undefined ? undefined : JSON.stringify(body)); }
 function failure(res: ServerResponse, status: number, code: string, message: string) { send(res, status, { error: { code, message } }); }
 async function body(req: IncomingMessage) { const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); try { return JSON.parse(Buffer.concat(chunks).toString() || "{}"); } catch { return {}; } }
-function updateProjectStates() { if (Date.now() - boot > 6000) projects = projects.map((item) => item.id === "prj_blog" ? { ...item, stage: "ready", ready_at: now(), size_bytes: 2_420_000 } : item); }
+function updateProjectStates() { if (Date.now() - boot > 6000) projects = projects.map((item) => item.id === "prj_blog" && item.stage !== "deleting" ? { ...item, stage: "ready", ready_at: now(), size_bytes: 2_420_000 } : item); }
 function tick(job: MockJob) {
   const elapsed = Math.floor((Date.now() - job.started_at * 1000) / 1000); job.elapsed_seconds = elapsed;
   const stages = job.kind === "backup" ? ["preparing", "snapshot", "dump", "checksum", "upload_archive", "upload_manifest", "done"] : ["download", "verify_archive", "create_project", "restore", "verify", "done"];

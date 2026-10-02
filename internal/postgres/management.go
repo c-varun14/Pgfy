@@ -364,24 +364,33 @@ func (m *Management) DropProject(ctx context.Context, database, role string) err
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	name := pgx.Identifier{role}.Sanitize()
-	var exists bool
-	if e := m.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)", role).Scan(&exists); e != nil {
+	// Only what this installation created is removed: a role it is not a
+	// member of, or a database another role owns, predates the project (the
+	// name collided when it was set up) and is left alone.
+	var ours, ownedDatabase bool
+	if e := m.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1 AND pg_has_role(current_user, oid, 'MEMBER')),
+		EXISTS(SELECT 1 FROM pg_database WHERE datname=$2 AND pg_get_userbyid(datdba)=$1)`, role, database).Scan(&ours, &ownedDatabase); e != nil {
 		return e
 	}
-	if exists {
+	if ours {
 		if _, e := m.Pool.Exec(ctx, "ALTER ROLE "+name+" NOLOGIN"); e != nil {
 			return fmt.Errorf("logins could not be disabled: %w", e)
 		}
 	}
 	if _, e := m.Pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-		WHERE (usename=$1 OR datname=$2) AND backend_type='client backend' AND pid<>pg_backend_pid()`, role, database); e != nil {
+		WHERE usename=$1 AND backend_type='client backend' AND pid<>pg_backend_pid()`, role); e != nil {
 		return fmt.Errorf("sessions could not be ended: %w", e)
 	}
-	if _, e := m.Pool.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); e != nil {
-		return fmt.Errorf("the database could not be dropped: %w", e)
+	if ownedDatabase {
+		// FORCE ends any other session still on the database.
+		if _, e := m.Pool.Exec(ctx, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); e != nil {
+			return fmt.Errorf("the database could not be dropped: %w", e)
+		}
 	}
-	if _, e := m.Pool.Exec(ctx, "DROP ROLE IF EXISTS "+name); e != nil {
-		return fmt.Errorf("the database user could not be dropped: %w", e)
+	if ours {
+		if _, e := m.Pool.Exec(ctx, "DROP ROLE "+name); e != nil {
+			return fmt.Errorf("the database user could not be dropped: %w", e)
+		}
 	}
 	return nil
 }

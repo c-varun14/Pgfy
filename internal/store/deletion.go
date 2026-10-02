@@ -11,6 +11,10 @@ import (
 // or a failed project may be deleted, so deletion never races the provisioner.
 var ErrNotDeletable = errors.New("the project cannot be deleted while it is being set up")
 
+// ErrProjectBusy means a job is running against the project right now, such
+// as a restore into it; deleting it underneath would make that job's result a lie.
+var ErrProjectBusy = errors.New("a job is running for this project")
+
 // BeginProjectDeletion marks the project for deletion and, in the same
 // transaction, records the audit row, cancels the project's queued jobs and
 // queues the delete job. The delete job is queued even behind another job: the
@@ -43,9 +47,21 @@ func (s *Store) BeginProjectDeletion(ctx context.Context, projectID string, newJ
 		if !errors.Is(e, sql.ErrNoRows) {
 			return job, false, e
 		}
+		// Asking again after a failure is an administrative action of its own.
+		entry.Action = "project.delete.retry"
+		if e = audit(ctx, tx, entry); e != nil {
+			return job, false, e
+		}
 	} else {
 		if p.Stage != "ready" && !p.Failed {
 			return job, false, ErrNotDeletable
+		}
+		var running int
+		if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM jobs WHERE project_id=? AND state='running'", projectID).Scan(&running); e != nil {
+			return job, false, e
+		}
+		if running > 0 {
+			return job, false, ErrProjectBusy
 		}
 		if _, e = tx.ExecContext(ctx, "UPDATE projects SET stage='deleting', failed=0, stage_error='', deleting_at=? WHERE id=?", now.Unix(), projectID); e != nil {
 			return job, false, e
@@ -54,6 +70,10 @@ func (s *Store) BeginProjectDeletion(ctx context.Context, projectID string, newJ
 			return job, false, e
 		}
 		if e = audit(ctx, tx, entry); e != nil {
+			return job, false, e
+		}
+		// Its backup conditions end with the deletion request, without a "resolved" notice.
+		if _, e = tx.ExecContext(ctx, "DELETE FROM alert_conditions WHERE key IN (?,?)", "backup_failed:"+projectID, "backup_stale:"+projectID); e != nil {
 			return job, false, e
 		}
 		created = true
@@ -116,7 +136,7 @@ func (s *Store) ResumeDeletions(ctx context.Context, newJob func(Project) (id, i
 
 // LastDeleteJob returns the newest delete job of a project, if any.
 func (s *Store) LastDeleteJob(ctx context.Context, projectID string) (*Job, error) {
-	j, e := scanJob(s.DB.QueryRowContext(ctx, "SELECT "+jobCols+" FROM jobs WHERE project_id=? AND kind='delete' ORDER BY created_at DESC, id DESC LIMIT 1", projectID))
+	j, e := scanJob(s.DB.QueryRowContext(ctx, "SELECT "+jobCols+" FROM jobs WHERE project_id=? AND kind='delete' ORDER BY created_at DESC, rowid DESC LIMIT 1", projectID))
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -173,7 +193,9 @@ func (s *Store) CompleteProjectDeletion(ctx context.Context, jobID string, p Pro
 
 // FailDeleteJob records a failed deletion attempt. The administrator is told
 // once per deletion, on its first failure; later automatic retries that fail
-// the same way are visible on the project without repeating the alert.
+// the same way are visible on the project without repeating the alert. An
+// interruption does not count: it was reported as resuming, so a failure
+// after it must still be told.
 func (s *Store) FailDeleteJob(ctx context.Context, jobID, projectID, projectName, stage, message, result string, now time.Time) error {
 	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
@@ -181,7 +203,7 @@ func (s *Store) FailDeleteJob(ctx context.Context, jobID, projectID, projectName
 	}
 	defer tx.Rollback()
 	var earlier int
-	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM jobs WHERE project_id=? AND kind='delete' AND state IN ('failed','interrupted') AND id<>?", projectID, jobID).Scan(&earlier); e != nil {
+	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM jobs WHERE project_id=? AND kind='delete' AND state='failed' AND id<>?", projectID, jobID).Scan(&earlier); e != nil {
 		return e
 	}
 	if _, e = tx.ExecContext(ctx, "UPDATE jobs SET state='failed', stage=?, error=?, result=?, finished_at=? WHERE id=?", stage, message, result, now.Unix(), jobID); e != nil {

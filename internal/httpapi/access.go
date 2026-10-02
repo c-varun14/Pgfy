@@ -102,6 +102,10 @@ func (s *Server) rotateCredentials(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	password, e := s.Provisioner.Rotate(ctx, p, s.auditEntry(w, "credentials.rotate", p.ID, nil))
 	if e != nil {
+		if errors.Is(e, store.ErrProjectNotFound) {
+			failure(w, 409, "not_ready", "Passwords can be changed once the database is ready.")
+			return
+		}
 		if errors.Is(e, provision.ErrRotationIncomplete) {
 			failure(w, 502, "rotation_incomplete", "PostgreSQL did not confirm the new password yet. It will be finished automatically; the new password is shown once it is active.")
 			return

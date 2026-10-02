@@ -499,6 +499,9 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(e, store.ErrNotDeletable):
 		failure(w, 409, "not_deletable", "Wait until the database is ready or its setup has failed.")
 		return
+	case errors.Is(e, store.ErrProjectBusy):
+		failure(w, 409, "job_busy", "A backup or restore of this database is running. Try again when it finishes.")
+		return
 	case errors.Is(e, store.ErrProjectNotFound):
 		failure(w, 404, "not_found", "Project not found.")
 		return
@@ -509,6 +512,9 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	s.Jobs.Kick()
 	if updated, e := s.Store.Project(r.Context(), p.ID); e == nil {
 		p = updated
+	} else {
+		// The worker may already have finished: it is deleting, never ready again.
+		p.Stage, p.DeletingAt = "deleting", s.Now().Unix()
 	}
 	write(w, 202, map[string]any{"project": s.projectSummary(r, p), "job": s.jobView(job)})
 }

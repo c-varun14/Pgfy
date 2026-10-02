@@ -207,3 +207,43 @@ func TestDeletionIsRefusedWhileProvisioningAndDuringUpdates(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestDeletionRetryIsAuditedAndRunningJobsBlockIt(t *testing.T) {
+	w, s, roles, _ := deleteWorker(t)
+	ctx := context.Background()
+	shop := readyProject(t, s, "000000000051", "Shop")
+	// A restore or backup running against the project must finish first.
+	restore, _ := s.EnqueueJob(ctx, "job_restore", "restore", shop.ID, "{}", time.Now())
+	s.ClaimJob(ctx, time.Now())
+	if _, _, e := s.BeginProjectDeletion(ctx, shop.ID, NewDeleteJob, store.AuditEntry{Action: "project.delete"}, time.Now()); !errors.Is(e, store.ErrProjectBusy) {
+		t.Fatal(e)
+	}
+	s.FinishJob(ctx, restore.ID, "succeeded", "done", "", "{}", time.Now())
+	// Interrupted, then failed: the failure is still alerted, as the interruption promised a resume.
+	roles.fail = errors.New("refused")
+	job, _, e := s.BeginProjectDeletion(ctx, shop.ID, NewDeleteJob, store.AuditEntry{Action: "project.delete"}, time.Now())
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.ClaimJob(ctx, time.Now())
+	s.InterruptRunningJobs(ctx, time.Now(), time.Hour)
+	if _, created, e := s.BeginProjectDeletion(ctx, shop.ID, NewDeleteJob, store.AuditEntry{Action: "project.delete"}, time.Now()); e != nil || created {
+		t.Fatal(created, e)
+	}
+	w.drain(ctx)
+	if j, _ := s.Job(ctx, job.ID); j.State != "interrupted" {
+		t.Fatal(j.State)
+	}
+	alerts, _ := s.AlertsToSend(ctx, time.Now())
+	failed := false
+	for _, a := range alerts {
+		failed = failed || a.Kind == "delete_failed"
+	}
+	if !failed {
+		t.Fatal("a failure after an interruption was not alerted", alerts)
+	}
+	entries, _ := s.AuditEntries(ctx, 5)
+	if entries[0].Action != "project.delete.retry" {
+		t.Fatal(entries)
+	}
+}
