@@ -221,7 +221,7 @@ func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
 	}
 	var next int64
 	if configured && newest > 0 {
-		next = newest + int64(policy.Interval()/time.Second)
+		next = policy.NextAfter(newest)
 	}
 	if schedule.NextAttemptAt > next {
 		next = schedule.NextAttemptAt
@@ -260,7 +260,13 @@ func (s *Server) putBackupPolicy(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); !ok {
 		return
 	}
-	var in store.BackupPolicy
+	// Fields the request leaves out keep their stored values, so a client that
+	// does not know the preferred hour never resets it.
+	in, e := s.Store.BackupPolicy(r.Context())
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Backup settings could not be read.")
+		return
+	}
 	if !decode(w, r, &in) {
 		return
 	}

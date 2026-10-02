@@ -17,18 +17,27 @@ import { type ThemePreference, useTheme } from "../theme";
 const INTERVALS = [24, 12, 6, 1];
 function intervalLabel(hours: number) { return hours === 1 ? "Every hour" : hours === 24 ? "Every day" : `Every ${hours} hours`; }
 
+const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
+/** The stored hour is UTC; the label adds the viewer's local time, which may fall on a half hour. */
+function hourLabel(hour: number) {
+  const at = new Date(); at.setUTCHours(hour, 0, 0, 0);
+  return `${String(hour).padStart(2, "0")}:00 UTC (${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} your time)`;
+}
+
 /** The interval is a target the scheduler works towards, not a promise: one
  *  backup runs at a time and a failing database is retried with a backoff. */
 function BackupsCard() {
   const [policy, setPolicy] = useState<BackupPolicy | null>(null); const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const { showToast } = useToast();
   useEffect(() => { void api<BackupPolicy>("/settings/backups").then(setPolicy).catch((failure) => setError((failure as Error).message)); }, []);
-  async function choose(hours: number) {
-    if (!policy || hours === policy.target_interval_hours) return;
+  async function save(change: Partial<BackupPolicy>, message: string) {
+    if (!policy) return;
     setBusy(true); setError("");
-    try { setPolicy(await api<BackupPolicy>("/settings/backups", { method: "PUT", body: JSON.stringify({ ...policy, target_interval_hours: hours }) })); showToast("Backup target updated"); }
+    try { setPolicy(await api<BackupPolicy>("/settings/backups", { method: "PUT", body: JSON.stringify({ ...policy, ...change }) })); showToast(message); }
     catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   }
+  function choose(hours: number) { if (policy && hours !== policy.target_interval_hours) void save({ target_interval_hours: hours }, "Backup target updated"); }
+  const daily = policy?.target_interval_hours === 24;
   return <Card><CardHeader title="Backups" />
     {policy ? <>
       <div className="setting-row">
@@ -37,6 +46,14 @@ function BackupsCard() {
           {INTERVALS.map((hours) => <option key={hours} value={hours}>{intervalLabel(hours)}</option>)}
         </select>
       </div>
+      <div className="setting-row">
+        <label htmlFor="backup-hour">Start daily backups at</label>
+        <select id="backup-hour" value={policy.preferred_hour} disabled={busy || !daily} onChange={(event) => void save({ preferred_hour: Number(event.target.value) }, "Backup hour updated")}>
+          <option value={-1}>Any time</option>
+          {HOURS.map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
+        </select>
+      </div>
+      {daily && policy.preferred_hour >= 0 && <p className="caption">Scheduled backups start at or after this hour, one database at a time. A database with no backup yet is backed up straight away.</p>}
       <p className="caption">A target, not a guarantee: one backup runs at a time, and a database whose backup fails is retried after 15 minutes, an hour, then four hours. The dashboard warns when the newest recoverable backup is older than one and a half times this.</p>
       <p className="caption">Kept in your bucket: the newest backup of each database, then {policy.retention_daily} daily and {policy.retention_weekly} weekly. Older ones are deleted after a successful backup.</p>
     </> : !error && <p>Loading backup settings…</p>}

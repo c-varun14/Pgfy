@@ -195,7 +195,10 @@ def main():
             compose("run", "--rm", "--no-deps", "application", "initialize-store")
             compose("up", "-d")
             wait_ready()
-            passed("three-service startup, authenticated PostgreSQL readiness, SQLite, Caddy routing")
+            shared_buffers, effective_cache = host.postgres_memory(host.host_memory_mib())
+            sized = sql("SELECT string_agg(name || '=' || (setting::bigint * 8 / 1024)::text, ',' ORDER BY name) FROM pg_settings WHERE name IN ('effective_cache_size','shared_buffers');")
+            assert sized == f"effective_cache_size={effective_cache},shared_buffers={shared_buffers}", ("memory sizing not applied", sized)
+            passed("three-service startup, authenticated PostgreSQL readiness, SQLite, Caddy routing; PostgreSQL memory sized from the host")
             assert "<div id=\"root\">" in request("/")[1]
             token = compose("exec", "-T", "application", "pgfy", "setup-token").stdout.strip()
             password = "integration passphrase that is long"

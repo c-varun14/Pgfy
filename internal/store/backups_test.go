@@ -49,7 +49,7 @@ func TestBackupCandidatesRotateAndBackOff(t *testing.T) {
 	young := ready(t, s, "bbb000000002", start.Add(time.Minute))
 	now := start.Add(2 * day)
 
-	got, e := s.BackupCandidates(ctx, "target", "install", now, day)
+	got, e := s.BackupCandidates(ctx, "target", "install", now, now.Add(-day))
 	if e != nil || len(got) != 2 || got[0].ID != old.ID {
 		t.Fatal(ids(got), e)
 	}
@@ -60,7 +60,7 @@ func TestBackupCandidatesRotateAndBackOff(t *testing.T) {
 	if e := s.CompleteBackupJob(ctx, "job_1", old.ID, "failed", "dump", "pg_dump failed", "{}", nil, true, now, day); e != nil {
 		t.Fatal(e)
 	}
-	got, _ = s.BackupCandidates(ctx, "target", "install", now.Add(time.Minute), day)
+	got, _ = s.BackupCandidates(ctx, "target", "install", now.Add(time.Minute), now.Add(time.Minute).Add(-day))
 	if len(got) != 1 || got[0].ID != young.ID {
 		t.Fatal("the failing project still blocks the queue", ids(got))
 	}
@@ -95,7 +95,7 @@ func TestBackupCandidatesRotateAndBackOff(t *testing.T) {
 		t.Fatal(schedule)
 	}
 	recoverable(t, s, "target", "install", old, at)
-	got, _ = s.BackupCandidates(ctx, "target", "install", at.Add(time.Hour), day)
+	got, _ = s.BackupCandidates(ctx, "target", "install", at.Add(time.Hour), at.Add(time.Hour).Add(-day))
 	if len(got) != 1 || got[0].ID != young.ID {
 		t.Fatal("a fresh backup should stop the project being due", ids(got))
 	}
@@ -110,17 +110,17 @@ func TestBackupCandidatesIgnoreForeignBackups(t *testing.T) {
 	p := ready(t, s, "aaa000000001", start)
 	now := start.Add(48 * time.Hour)
 	recoverable(t, s, "target", "somebody-else", p, now.Add(-time.Minute))
-	got, _ := s.BackupCandidates(ctx, "target", "install", now, 24*time.Hour)
+	got, _ := s.BackupCandidates(ctx, "target", "install", now, now.Add(-24*time.Hour))
 	if len(got) != 1 {
 		t.Fatal("a foreign backup satisfied a local schedule", ids(got))
 	}
 	// The same bucket under a different store is also not this store's answer.
 	recoverable(t, s, "other-target", "install", p, now.Add(-time.Minute))
-	if got, _ = s.BackupCandidates(ctx, "target", "install", now, 24*time.Hour); len(got) != 1 {
+	if got, _ = s.BackupCandidates(ctx, "target", "install", now, now.Add(-24*time.Hour)); len(got) != 1 {
 		t.Fatal("another store's backup satisfied this one", ids(got))
 	}
 	recoverable(t, s, "target", "install", p, now.Add(-time.Minute))
-	if got, _ = s.BackupCandidates(ctx, "target", "install", now, 24*time.Hour); len(got) != 0 {
+	if got, _ = s.BackupCandidates(ctx, "target", "install", now, now.Add(-24*time.Hour)); len(got) != 0 {
 		t.Fatal("this installation's own backup was ignored", ids(got))
 	}
 }
@@ -318,5 +318,43 @@ func TestPruneJobsKeepsLiveProvenance(t *testing.T) {
 	}
 	if ours, _ := s.AbandonedUploadKey(ctx, "another-target", directory, now); ours {
 		t.Fatal("provenance authorised a different store")
+	}
+}
+
+// With a preferred hour, a daily backup is due once that hour has come round
+// since the newest backup; the next one is the first such hour after it.
+func TestPreferredBackupHour(t *testing.T) {
+	at := func(s string) time.Time { v, _ := time.Parse("2006-01-02 15:04", s); return v }
+	p := BackupPolicy{TargetIntervalHours: 24, PreferredHour: 2}
+	cases := []struct{ now, dueBefore string }{
+		{"2026-10-02 01:59", "2026-10-01 01:59"},
+		{"2026-10-02 02:00", "2026-10-02 01:59"},
+		{"2026-10-02 23:30", "2026-10-02 01:59"},
+	}
+	for _, c := range cases {
+		if got := p.DueBefore(at(c.now)); !got.Equal(at(c.dueBefore).Add(59 * time.Second)) {
+			t.Fatal(c.now, got)
+		}
+	}
+	for newest, next := range map[string]string{"2026-10-02 01:50": "2026-10-02 02:00", "2026-10-02 02:00": "2026-10-03 02:00", "2026-10-02 05:00": "2026-10-03 02:00"} {
+		if got := p.NextAfter(at(newest).Unix()); got != at(next).Unix() {
+			t.Fatal(newest, time.Unix(got, 0).UTC())
+		}
+	}
+	// A backup at 02:10 satisfies today's window; at 01:59 it does not.
+	now := at("2026-10-02 03:00")
+	if !(at("2026-10-02 02:10").After(p.DueBefore(now)) && !at("2026-10-02 01:59").After(p.DueBefore(now))) {
+		t.Fatal("window boundary")
+	}
+	// Other intervals, and "any time", ignore the hour.
+	for _, other := range []BackupPolicy{{TargetIntervalHours: 6, PreferredHour: 2}, {TargetIntervalHours: 24, PreferredHour: -1}} {
+		if got := other.DueBefore(now); !got.Equal(now.Add(-other.Interval())) {
+			t.Fatal(other, got)
+		}
+	}
+	for _, hour := range []int{-2, 24} {
+		if (BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, PreferredHour: hour}).Validate() == nil {
+			t.Fatal("accepted hour", hour)
+		}
 	}
 }

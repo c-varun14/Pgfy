@@ -191,6 +191,8 @@ export type BackupPolicy = {
   target_interval_hours: number;
   retention_daily: number;
   retention_weekly: number;
+  /** UTC hour daily backups start at or after; -1 is any time. */
+  preferred_hour: number;
   updated_at: number;
 };
 export type CheckStep = { name: string; ok: boolean; error?: string; detail?: string };

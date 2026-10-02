@@ -191,8 +191,22 @@ func TestBackupPolicyEndpoint(t *testing.T) {
 		t.Fatal(r.Code, r.Body.String())
 	}
 	policy, e := f.s.Store.BackupPolicy(context.Background())
-	if e != nil || policy.TargetIntervalHours != 6 || policy.RetentionDaily != 7 {
+	if e != nil || policy.TargetIntervalHours != 6 || policy.RetentionDaily != 7 || policy.PreferredHour != -1 {
 		t.Fatal(policy, e)
+	}
+	// The dashboard sends back the whole policy, updated_at included.
+	if r = f.request("PUT", "/api/v1/settings/backups", `{"target_interval_hours":24,"retention_daily":7,"retention_weekly":4,"preferred_hour":3,"updated_at":1}`, cookie, csrf, f.s.Config.Origin); r.Code != 200 {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	// A client that does not know the hour leaves it as it was.
+	if r = f.request("PUT", "/api/v1/settings/backups", `{"target_interval_hours":24,"retention_daily":1,"retention_weekly":0}`, cookie, csrf, f.s.Config.Origin); r.Code != 200 {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	if policy, _ = f.s.Store.BackupPolicy(context.Background()); policy.PreferredHour != 3 || policy.RetentionDaily != 1 {
+		t.Fatal("the preferred hour was reset", policy)
+	}
+	if r = f.request("PUT", "/api/v1/settings/backups", `{"preferred_hour":24}`, cookie, csrf, f.s.Config.Origin); r.Code != 400 {
+		t.Fatal("an invalid hour was accepted", r.Code)
 	}
 }
 

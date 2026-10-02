@@ -165,11 +165,29 @@ def placeholder_certificate(directory):
         atomic(directory / "server.crt", (work / "server.crt").read_bytes(), 0o644, 999, 999)
     json_write(directory / "state.json", {"state": "placeholder", "source": "self-signed", "issuer": "", "not_after": "", "fingerprint": ""}, 0o644)
 
+def host_memory_mib():
+    return int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:"))) // 1024
+
+def postgres_memory(total_mib):
+    """PostgreSQL memory from measured host memory, after 1 GiB for the OS, Docker, Caddy, the application and its
+    pg_dump/pg_restore processes: a quarter of the rest for shared_buffers, three quarters as the planner's
+    effective_cache_size. About 200 MB and 620 MB on the 2 GiB validation host."""
+    rest = total_mib - 1024
+    return min(max(rest // 4, 128), 8192), max(rest * 3 // 4, 256)
+
+MEMORY_KEYS = ("PG_SHARED_BUFFERS", "PG_EFFECTIVE_CACHE_SIZE")
+
+def without_memory(env):
+    """compose.env without the measured memory lines, which legitimately change when the server is resized."""
+    return "".join(line for line in env.splitlines(keepends=True) if line.split("=", 1)[0] not in MEMORY_KEYS)
+
 def compose_env(root, state, cfg):
     # Loopback-published connections (the SSH-tunnel path) arrive from the Docker gateway only.
     tunnel_source = str(ipaddress.ip_network(state["public_subnet"])[1]) + "/32"
     values = {"INSTALL_DIR": str(root), "APP_IMAGE": state["images"]["application"], "POSTGRES_IMAGE": state["images"]["postgres"], "CADDY_IMAGE": state["images"]["caddy"], "VOLUME_PREFIX": state["volume_prefix"], "DATABASE_SUBNET": state["database_subnet"], "PROXY_SUBNET": state["proxy_subnet"], "PUBLIC_SUBNET": state["public_subnet"], "TUNNEL_SOURCE": tunnel_source, "PG_BIND": "0.0.0.0" if cfg["mode"] == "https" else "127.0.0.1",
               "SCHEDULE_INTERVAL": os.environ.get("PGFY_SCHEDULE_INTERVAL", "5m")}
+    shared_buffers, effective_cache = postgres_memory(host_memory_mib())
+    values.update(PG_SHARED_BUFFERS=f"{shared_buffers}MB", PG_EFFECTIVE_CACHE_SIZE=f"{effective_cache}MB")
     return "\n".join(f"{k}={v}" for k, v in values.items()) + "\n"
 
 POSTGRES_POLICY = re.compile(r"postgres:18\.[0-9]+-bookworm@sha256:[a-f0-9]{64}\Z")
@@ -339,8 +357,7 @@ def preflight(root, release, hostname, mode, existing):
     filesystem = run(["findmnt", "-n", "-o", "FSTYPE", "-T", str(ancestor)]).stdout.strip()
     if filesystem not in ("ext4", "xfs", "btrfs"):
         raise InstallError("Installation requires persistent local ext4, XFS, or Btrfs storage.")
-    mem_kib = int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:")))
-    if (os.cpu_count() or 0) < 2 or mem_kib < 1900000 or shutil.disk_usage(ancestor).free < 20 * 1024**3:
+    if (os.cpu_count() or 0) < 2 or host_memory_mib() < 1855 or shutil.disk_usage(ancestor).free < 20 * 1024**3:
         raise InstallError("Validation minimum: 2 vCPU, 2 GiB RAM, and 20 GiB free installation disk.")
     network_preflight(hostname)
     if not shutil.which("docker"):
@@ -547,8 +564,11 @@ def install(args):
             if state["stage"] != "preparing":
                 raise InstallError(f"Installation configuration {path.name} is missing; restore it from your host backup.")
             atomic(path, content, 0o600 if path.name == "compose.env" else 0o644)
-        elif path.name in ("compose.env", "installation-id") and path.read_text() != content:
+        elif path.name == "installation-id" and path.read_text() != content or path.name == "compose.env" and without_memory(path.read_text()) != without_memory(content):
             raise InstallError(f"{path.name} no longer matches persisted installation/release/volume identity. Restore the original configuration; no services were changed.")
+        elif path.name == "compose.env" and path.read_text() != content:
+            # Memory was measured again (the server may have been resized); PostgreSQL picks it up when started below.
+            atomic(path, content, 0o600)
     placeholder_certificate(root / "config/postgres-tls")
     installation.compose("config", "--quiet")
     converge_steps(installation)
@@ -871,6 +891,9 @@ def converge(root, contract, lock_fd):
 
 def converge_installation(installation):
     """Everything this release changes on an installed host during an update."""
+    # The previous release's installer wrote compose.env; this release's own keys (PostgreSQL memory) are added
+    # here, before PostgreSQL is recreated. compose.env was snapshotted earlier, so a rollback restores it.
+    atomic(installation.root / "compose.env", compose_env(installation.root, installation.state, installation.config()), 0o600)
     converge_steps(installation)
     converge_host(installation.root, installation.config()["mode"])
     # PostgreSQL keeps running through an update; the later force-recreate applies new server flags.

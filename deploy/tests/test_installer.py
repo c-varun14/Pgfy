@@ -391,13 +391,21 @@ class UpdateTests(unittest.TestCase):
 
 class ConvergeTests(unittest.TestCase):
     def test_update_converge_grants_without_recreating_postgres(self):
-        installation = SimpleNamespace(root=Path("/nonexistent"), state=TEST_STATE)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        installation = SimpleNamespace(root=Path(directory.name), state=TEST_STATE)
         calls = []
         installation.compose = lambda *args, **kwargs: calls.append((args, kwargs)) or SimpleNamespace(returncode=0, stdout="")
         installation.wait_postgres = lambda: calls.append((("wait",), {}))
         installation.config = lambda: {"mode": "https"}
-        with patch.object(installer, "converge_steps") as steps, patch.object(installer, "converge_host") as host:
+        with patch.object(installer, "converge_steps") as steps, patch.object(installer, "converge_host") as host, \
+                patch.object(installer, "host_memory_mib", return_value=4096):
             installer.converge_installation(installation)
+        # The new release adds its own compose.env keys before PostgreSQL is recreated by the update.
+        env = (installation.root / "compose.env").read_text()
+        self.assertIn("PG_SHARED_BUFFERS=768MB", env)
+        self.assertIn("PG_EFFECTIVE_CACHE_SIZE=2304MB", env)
+        self.assertEqual((installation.root / "compose.env").stat().st_mode & 0o777, 0o600)
         steps.assert_called_once()
         host.assert_called_once_with(installation.root, "https")
         up = [args for args, _ in calls if "up" in args]
@@ -575,3 +583,21 @@ class RecoveryKitTests(unittest.TestCase):
         with self.assertRaises(installer.InstallError):
             self.export(SimpleNamespace(isatty=lambda: False, buffer=Closed()))
         self.assertFalse((self.root / "data/sqlite" / installer.KIT_SNAPSHOT).exists())
+
+class MemoryTests(unittest.TestCase):
+    def test_postgres_memory_leaves_headroom(self):
+        self.assertEqual(installer.postgres_memory(1855), (207, 623))
+        self.assertEqual(installer.postgres_memory(4096), (768, 2304))
+        self.assertEqual(installer.postgres_memory(65536), (8192, 48384))
+        self.assertEqual(installer.postgres_memory(1200), (128, 256))
+
+    def test_compose_env_carries_memory_and_rerun_comparison_ignores_it(self):
+        with patch.object(installer, "host_memory_mib", return_value=2048):
+            small = installer.compose_env(Path("/opt/x"), TEST_STATE, {"mode": "tunnel"})
+        with patch.object(installer, "host_memory_mib", return_value=8192):
+            large = installer.compose_env(Path("/opt/x"), TEST_STATE, {"mode": "tunnel"})
+        self.assertIn("PG_SHARED_BUFFERS=256MB", small)
+        self.assertNotEqual(small, large)
+        self.assertEqual(installer.without_memory(small), installer.without_memory(large))
+        self.assertNotIn("PG_SHARED_BUFFERS", installer.without_memory(small))
+        self.assertIn("PG_BIND", installer.without_memory(small))

@@ -82,7 +82,7 @@ func (w *Worker) now() time.Time {
 func (w *Worker) Policy(ctx context.Context) store.BackupPolicy {
 	p, e := w.Store.BackupPolicy(ctx)
 	if e != nil {
-		return store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 14, RetentionWeekly: 8}
+		return store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 14, RetentionWeekly: 8, PreferredHour: -1}
 	}
 	return p
 }
@@ -266,7 +266,7 @@ func (w *Worker) scheduleBackups(ctx context.Context) {
 		return
 	}
 	now := w.now()
-	candidates, e := w.Store.BackupCandidates(ctx, target, w.InstallationID, now, w.Policy(ctx).Interval())
+	candidates, e := w.Store.BackupCandidates(ctx, target, w.InstallationID, now, w.Policy(ctx).DueBefore(now))
 	if e != nil {
 		slog.Error("backup schedule unavailable", "reason", e.Error())
 		return

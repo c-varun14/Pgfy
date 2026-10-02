@@ -19,10 +19,12 @@ const (
 )
 
 type BackupPolicy struct {
-	TargetIntervalHours int   `json:"target_interval_hours"`
-	RetentionDaily      int   `json:"retention_daily"`
-	RetentionWeekly     int   `json:"retention_weekly"`
-	UpdatedAt           int64 `json:"updated_at"`
+	TargetIntervalHours int `json:"target_interval_hours"`
+	RetentionDaily      int `json:"retention_daily"`
+	RetentionWeekly     int `json:"retention_weekly"`
+	// PreferredHour is the UTC hour daily backups start at or after; -1 is any time.
+	PreferredHour int   `json:"preferred_hour"`
+	UpdatedAt     int64 `json:"updated_at"`
 }
 
 // Interval is the backup target: a goal the scheduler works towards, never a
@@ -43,13 +45,48 @@ func (p BackupPolicy) Validate() error {
 	if p.RetentionWeekly < 0 || p.RetentionWeekly > 52 {
 		return errors.New("weekly retention must be between 0 and 52 backups")
 	}
+	if p.PreferredHour < -1 || p.PreferredHour > 23 {
+		return errors.New("the preferred hour must be between 0 and 23, or any time")
+	}
 	return nil
+}
+
+// hourly reports whether the preferred hour applies: only to daily backups.
+func (p BackupPolicy) hourly() bool { return p.PreferredHour >= 0 && p.TargetIntervalHours == 24 }
+
+// DueBefore is the newest-backup time at or before which a project is due.
+// With a preferred hour, a project is due once that hour has come round since
+// its newest backup; otherwise once the interval has passed.
+func (p BackupPolicy) DueBefore(now time.Time) time.Time {
+	if !p.hourly() {
+		return now.Add(-p.Interval())
+	}
+	now = now.UTC()
+	window := time.Date(now.Year(), now.Month(), now.Day(), p.PreferredHour, 0, 0, 0, time.UTC)
+	if window.After(now) {
+		window = window.AddDate(0, 0, -1)
+	}
+	return window.Add(-time.Second)
+}
+
+// NextAfter is when a project whose newest backup was taken at newest becomes
+// due again, consistent with DueBefore.
+func (p BackupPolicy) NextAfter(newest int64) int64 {
+	if !p.hourly() {
+		return newest + int64(p.Interval()/time.Second)
+	}
+	at := time.Unix(newest, 0).UTC()
+	next := time.Date(at.Year(), at.Month(), at.Day(), p.PreferredHour, 0, 0, 0, time.UTC)
+	if !next.After(at) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next.Unix()
 }
 
 func (s *Store) BackupPolicy(ctx context.Context) (BackupPolicy, error) {
 	var p BackupPolicy
-	e := s.DB.QueryRowContext(ctx, "SELECT target_interval_hours,retention_daily,retention_weekly,updated_at FROM backup_policy WHERE id=1").
-		Scan(&p.TargetIntervalHours, &p.RetentionDaily, &p.RetentionWeekly, &p.UpdatedAt)
+	e := s.DB.QueryRowContext(ctx, "SELECT target_interval_hours,retention_daily,retention_weekly,preferred_hour,updated_at FROM backup_policy WHERE id=1").
+		Scan(&p.TargetIntervalHours, &p.RetentionDaily, &p.RetentionWeekly, &p.PreferredHour, &p.UpdatedAt)
 	return p, e
 }
 
@@ -57,8 +94,8 @@ func (s *Store) SetBackupPolicy(ctx context.Context, p BackupPolicy, now time.Ti
 	if e := p.Validate(); e != nil {
 		return e
 	}
-	_, e := s.DB.ExecContext(ctx, "UPDATE backup_policy SET target_interval_hours=?, retention_daily=?, retention_weekly=?, updated_at=? WHERE id=1",
-		p.TargetIntervalHours, p.RetentionDaily, p.RetentionWeekly, now.Unix())
+	_, e := s.DB.ExecContext(ctx, "UPDATE backup_policy SET target_interval_hours=?, retention_daily=?, retention_weekly=?, preferred_hour=?, updated_at=? WHERE id=1",
+		p.TargetIntervalHours, p.RetentionDaily, p.RetentionWeekly, p.PreferredHour, now.Unix())
 	return e
 }
 
@@ -116,11 +153,11 @@ func backoff(failures int, interval time.Duration) time.Duration {
 }
 
 // BackupCandidates returns every ready project whose newest recoverable backup
-// in the active store is older than the target interval and whose backoff has
+// in the active store is at or before dueBefore (BackupPolicy.DueBefore) and whose backoff has
 // expired, least recently attempted first. A backup counts only when its
 // manifest names this installation, this project and its database, so another
 // server's backup can never satisfy a local project's schedule.
-func (s *Store) BackupCandidates(ctx context.Context, target, installationID string, now time.Time, interval time.Duration) ([]Project, error) {
+func (s *Store) BackupCandidates(ctx context.Context, target, installationID string, now, dueBefore time.Time) ([]Project, error) {
 	rows, e := s.DB.QueryContext(ctx, `
 		SELECT `+prefixed(projectCols, "p")+` FROM projects p
 		LEFT JOIN backup_schedule s ON s.project_id=p.id
@@ -131,7 +168,7 @@ func (s *Store) BackupCandidates(ctx context.Context, target, installationID str
 		  AND COALESCE(s.next_attempt_at,0) <= ?
 		  AND COALESCE(b.newest,0) <= ?
 		ORDER BY COALESCE(s.last_attempt_at,0) ASC, p.created_at ASC, p.id ASC`,
-		target, installationID, now.Unix(), now.Add(-interval).Unix())
+		target, installationID, now.Unix(), dueBefore.Unix())
 	if e != nil {
 		return nil, e
 	}

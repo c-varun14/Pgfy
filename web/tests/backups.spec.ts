@@ -37,6 +37,21 @@ test.describe("backups", () => {
     await expect(page.getByLabel("Back up each database")).toHaveValue("6");
   });
 
+  test("daily backups can start at a preferred hour", async ({ page }) => {
+    await page.goto("/settings");
+    await page.getByLabel("Back up each database").selectOption("24");
+    const hour = page.getByLabel("Start daily backups at");
+    await expect(hour).toBeEnabled();
+    await hour.selectOption("2");
+    await expect(page.getByText(/start at or after this hour/)).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel("Start daily backups at")).toHaveValue("2");
+    await page.getByLabel("Back up each database").selectOption("6");
+    await expect(page.getByLabel("Start daily backups at")).toBeDisabled();
+    await page.getByLabel("Back up each database").selectOption("24");
+    await page.getByLabel("Start daily backups at").selectOption("-1");
+  });
+
   test("a restore reports what it verified", async ({ page }) => {
     await page.goto("/backups");
     await page.getByRole("button", { name: "Restore latest" }).first().click();
