@@ -50,6 +50,7 @@ test.describe("backups", () => {
     await expect(page.getByLabel("Start daily backups at")).toBeDisabled();
     await page.getByLabel("Back up each database").selectOption("24");
     await page.getByLabel("Start daily backups at").selectOption("-1");
+    await expect(page.getByText(/start at or after this hour/)).toBeHidden();
   });
 
   test("a restore reports what it verified", async ({ page }) => {

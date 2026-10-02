@@ -135,7 +135,7 @@ func TestRetentionKeepsSeriesAndDeletesManifestFirst(t *testing.T) {
 	for _, day := range []string{"20260301T000000Z", "20260228T000000Z", "20260227T000000Z", "20260220T000000Z", "20260213T000000Z", "20260101T000000Z"} {
 		fake.put("app_shop", day, manifestFor("prj_shop", "Shop"))
 	}
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 2, RetentionWeekly: 1}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 2, RetentionWeekly: 1, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
@@ -169,7 +169,7 @@ func TestHalfDeleteIsNeverRecoverableAndIsRetried(t *testing.T) {
 	fake := newFakeStore()
 	fake.put("app_shop", "20260301T000000Z", manifestFor("prj_shop", "Shop"))
 	fake.put("app_shop", "20260101T000000Z", manifestFor("prj_shop", "Shop"))
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	expired := "pgfy/backups/app_shop/20260101T000000Z"
@@ -209,7 +209,7 @@ func TestFailedManifestDeletionLeavesTheBackupWhole(t *testing.T) {
 	fake := newFakeStore()
 	fake.put("app_shop", "20260301T000000Z", manifestFor("prj_shop", "Shop"))
 	fake.put("app_shop", "20260101T000000Z", manifestFor("prj_shop", "Shop"))
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	expired := "pgfy/backups/app_shop/20260101T000000Z"
@@ -222,7 +222,7 @@ func TestFailedManifestDeletionLeavesTheBackupWhole(t *testing.T) {
 	// by somebody else is not mistaken for our own half-delete.
 	delete(fake.removeErr, expired+"/manifest.json")
 	fake.removeErr[expired+"/archive.dump"] = errors.New("still denied")
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 90, RetentionWeekly: 52}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 90, RetentionWeekly: 52, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
@@ -260,7 +260,7 @@ func TestRetentionFailsClosedOnForeignOrDamagedContent(t *testing.T) {
 	foreign := manifestFor("prj_other", "Other")
 	foreign.InstallationID = "install-b"
 	fake.put("app_shop", "20251201T000000Z", foreign)
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
@@ -283,7 +283,7 @@ func TestRetentionRequiresProtection(t *testing.T) {
 	fake := newFakeStore()
 	fake.put("app_shop", "20260301T000000Z", manifestFor("prj_shop", "Shop"))
 	fake.put("app_shop", "20260101T000000Z", manifestFor("prj_shop", "Shop"))
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	fake.protection = storage.VersioningDisabled
@@ -430,7 +430,7 @@ func TestRetentionKeepsTheLastDayWhole(t *testing.T) {
 	for _, stamp := range []string{"20260301T110000Z", "20260301T100000Z", "20260301T090000Z", "20260227T110000Z", "20260227T100000Z"} {
 		fake.put("app_shop", stamp, manifestFor("prj_shop", "Shop"))
 	}
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 1, RetentionDaily: 3, RetentionWeekly: 0}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 1, RetentionDaily: 3, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
@@ -455,7 +455,7 @@ func TestMaintenanceReadsTheBucketButDeletesNothing(t *testing.T) {
 	for _, day := range []string{"20260301T000000Z", "20260220T000000Z", "20260101T000000Z"} {
 		fake.put("app_shop", day, manifestFor("prj_shop", "Shop"))
 	}
-	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0}, now); e != nil {
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
 		t.Fatal(e)
 	}
 	if e := s.SetMaintenance(ctx, true); e != nil {

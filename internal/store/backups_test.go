@@ -206,7 +206,7 @@ func TestBackupPolicyValidation(t *testing.T) {
 			t.Fatal("accepted", bad)
 		}
 	}
-	if e := s.SetBackupPolicy(ctx, BackupPolicy{TargetIntervalHours: 6, RetentionDaily: 7, RetentionWeekly: 4}, time.Now()); e != nil {
+	if e := s.SetBackupPolicy(ctx, BackupPolicy{TargetIntervalHours: 6, RetentionDaily: 7, RetentionWeekly: 4, PreferredHour: -1}, time.Now()); e != nil {
 		t.Fatal(e)
 	}
 	if policy, _ = s.BackupPolicy(ctx); policy.Interval() != 6*time.Hour {

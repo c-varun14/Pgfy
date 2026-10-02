@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("installer", ROOT / "deploy/installer.py")
 host = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(host)
+# A fixed host size, so the PostgreSQL memory the fixture asserts does not depend on the runner.
+host.host_memory_mib = lambda: 2048
 
 def run(args, **kwargs):
     return subprocess.run([str(x) for x in args], text=True, capture_output=True, check=True, timeout=240, **kwargs)
@@ -195,7 +197,7 @@ def main():
             compose("run", "--rm", "--no-deps", "application", "initialize-store")
             compose("up", "-d")
             wait_ready()
-            shared_buffers, effective_cache = host.postgres_memory(host.host_memory_mib())
+            shared_buffers, effective_cache = host.postgres_memory(2048)
             sized = sql("SELECT string_agg(name || '=' || (setting::bigint * 8 / 1024)::text, ',' ORDER BY name) FROM pg_settings WHERE name IN ('effective_cache_size','shared_buffers');")
             assert sized == f"effective_cache_size={effective_cache},shared_buffers={shared_buffers}", ("memory sizing not applied", sized)
             passed("three-service startup, authenticated PostgreSQL readiness, SQLite, Caddy routing; PostgreSQL memory sized from the host")

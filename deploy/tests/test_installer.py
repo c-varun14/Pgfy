@@ -601,3 +601,17 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(installer.without_memory(small), installer.without_memory(large))
         self.assertNotIn("PG_SHARED_BUFFERS", installer.without_memory(small))
         self.assertIn("PG_BIND", installer.without_memory(small))
+
+    def test_rerun_takes_a_new_memory_measurement_but_not_a_new_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = Path(directory) / "compose.env"
+            with patch.object(installer, "host_memory_mib", return_value=2048):
+                installer.write_generated({env: installer.compose_env(Path("/opt/x"), TEST_STATE, {"mode": "tunnel"})}, "preparing")
+            with patch.object(installer, "host_memory_mib", return_value=8192):
+                resized = installer.compose_env(Path("/opt/x"), TEST_STATE, {"mode": "tunnel"})
+                installer.write_generated({env: resized}, "installed")
+            self.assertEqual(env.read_text(), resized)
+            self.assertEqual(env.stat().st_mode & 0o777, 0o600)
+            moved = installer.compose_env(Path("/opt/x"), dict(TEST_STATE, volume_prefix="other"), {"mode": "tunnel"})
+            with self.assertRaisesRegex(installer.InstallError, "no longer matches"):
+                installer.write_generated({env: moved}, "installed")

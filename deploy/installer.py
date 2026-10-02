@@ -482,6 +482,19 @@ def converge_postgres(installation):
     command = 'PGPASSWORD="$(cat /run/secrets/bootstrap_password)" exec psql -U pgfy_bootstrap -d pgfy_system -XAtq -v ON_ERROR_STOP=1'
     installation.compose("exec", "-T", "postgres", "sh", "-c", command, input=POSTGRES_CONVERGE_SQL, timeout=60)
 
+def write_generated(generated, stage):
+    """Create generated configuration on a first install; on a rerun, refuse any change of identity, but take a new
+    memory measurement (the server may have been resized), which PostgreSQL picks up when it is started."""
+    for path, content in generated.items():
+        if not path.exists():
+            if stage != "preparing":
+                raise InstallError(f"Installation configuration {path.name} is missing; restore it from your host backup.")
+            atomic(path, content, 0o600 if path.name == "compose.env" else 0o644)
+        elif path.name == "installation-id" and path.read_text() != content or path.name == "compose.env" and without_memory(path.read_text()) != without_memory(content):
+            raise InstallError(f"{path.name} no longer matches persisted installation/release/volume identity. Restore the original configuration; no services were changed.")
+        elif path.name == "compose.env" and path.read_text() != content:
+            atomic(path, content, 0o600)
+
 def install(args):
     bundle = Path(args.bundle).resolve()
     release = verify_bundle(bundle)
@@ -559,16 +572,7 @@ def install(args):
         root / "config/caddy/Caddyfile": caddyfile(cfg),
         root / "compose.env": compose_env(root, state, cfg),
     }
-    for path, content in generated.items():
-        if not path.exists():
-            if state["stage"] != "preparing":
-                raise InstallError(f"Installation configuration {path.name} is missing; restore it from your host backup.")
-            atomic(path, content, 0o600 if path.name == "compose.env" else 0o644)
-        elif path.name == "installation-id" and path.read_text() != content or path.name == "compose.env" and without_memory(path.read_text()) != without_memory(content):
-            raise InstallError(f"{path.name} no longer matches persisted installation/release/volume identity. Restore the original configuration; no services were changed.")
-        elif path.name == "compose.env" and path.read_text() != content:
-            # Memory was measured again (the server may have been resized); PostgreSQL picks it up when started below.
-            atomic(path, content, 0o600)
+    write_generated(generated, state["stage"])
     placeholder_certificate(root / "config/postgres-tls")
     installation.compose("config", "--quiet")
     converge_steps(installation)
