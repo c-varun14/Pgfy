@@ -392,20 +392,42 @@ These are real today and shape Tier 0 A:
 - Audit view in Settings; a preferred backup hour; `shared_buffers` and `effective_cache_size` sized from measured host memory with headroom
   for Docker, Caddy, the application and dump/restore processes.
 
+Scoped down on 2026-10-02 by the owner: Pgfy has one administrator and should stay simple, so Tier 1 ships deletion, the
+recovery kit with daily SQLite copies, the preferred backup hour and the memory sizing. The rest moves to Tier 2 with
+the condition that would bring it back:
+
+- Automated weekly restore verification — when a client's acceptance needs restores proven more often than the
+  operator's own monthly restore check from the recovery runbook, or the host has room to spare for a weekly scratch
+  restore.
+- Bundle signing — when releases are installed by anyone other than the owner, or from anywhere but the owner's GitHub
+  releases (checksums over HTTPS from the owner's repository cover the single-operator case).
+- Slack/Discord adapters and SMTP — when a receiver is needed that cannot take the generic webhook (Slack incoming
+  webhooks work as is; Discord through its `/slack` URL).
+- An audit view in Settings — when more than one person administers an installation; until then the append-only
+  `audit` table is kept and can be read with `sqlite3` from a daily copy.
+
 ### Tier 2 — deferred, with the condition that would pull each one forward
 
 PgBouncer until measured connection pressure shows the budget is insufficient (the follow-up design below still applies); point-in-time
 recovery until a client's accepted backup target interval is shorter than one hour; high availability; automated major-version upgrades; a
-SQL editor; DNS-01 issuance; IPv6 probing; client-side backup encryption; signed manifests; team permissions (never).
+SQL editor; DNS-01 issuance; IPv6 probing; client-side backup encryption; signed manifests; team permissions (never); and the four Tier 1
+items deferred above.
 
-### Status (2026-09-24)
+### Status (2026-10-02)
 
 Tier 0 is implemented on `mvp-to-production`: A (backup correctness), the updater (`pgfyctl update` with automatic
 rollback), B (open-to-internet marker, connection budget with reserved slots, per-role guardrails, credential rotation,
 audit table), the rest of C (host status timer, certificate expiry, unattended upgrades, host runbook, webhook alerts)
 and D (TOTP second factor mandatory over HTTPS, SSH-issued reset). Each is covered by unit tests and by the local
 Compose integration run; the evidence the gate still needs from real servers and real operation is tracked in the
-[production gate checklist](production-gate.md). Tier 1 has not started.
+[production gate checklist](production-gate.md).
+
+Tier 1, as scoped down above, is implemented (2026-10-02): project deletion as a durable job with a `deleting`
+tombstone, `pgfyctl export-recovery-kit` and daily SQLite copies, a preferred backup hour, and PostgreSQL memory sized
+from the host. Each is covered by unit tests, the dashboard's browser tests where it has a screen, and the local
+Compose integration run against PostgreSQL 18 (deletion with an open session, the daily copy's integrity, the memory
+settings PostgreSQL reports). Weekly restore verification, bundle signing, notifier adapters/SMTP and the audit view
+are deferred (Tier 2).
 
 ### Sequencing
 

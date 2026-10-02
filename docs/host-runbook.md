@@ -71,32 +71,18 @@ notices when the whole host is down.
   is undone if that update rolls back; remove the entry from the authenticator app and enrol again at the next sign-in.
 - An update was interrupted: `sudo pgfyctl rollback-update`. Backups left paused: `sudo pgfyctl maintenance off`.
 
-## Retiring a database (until deletion exists)
+## Retiring a database
 
-Pgfy cannot delete a database yet. To stop a client using one while keeping its data safe:
+1. On its page, **Back up now** and confirm the backup completed (or **Freeze writes** first, so nothing written after
+   the backup is lost).
+2. **Delete**, type the database's name, and confirm. If there is no recoverable backup newer than the backup interval,
+   the dialog asks you to accept losing what was written since. Logins are disabled, sessions are ended, and the
+   database, its user and its access rule are removed; it disappears from the list when done.
+3. Its backups stay in the bucket under the retention policy (the newest is always kept), and can be restored from
+   **Backups** into a new database at any time. To remove them for good, delete its folder in the bucket yourself.
 
-1. On its page, **Freeze writes**, then **Back up now** and confirm the backup completed.
-2. Stop the role logging in and end its sessions, as the bootstrap role:
-   ```sh
-   cd /opt/firstcommit   # or the directory you passed to the installer with --dir
-   sudo ./pgfyctl diagnostics   # confirm the installation is healthy first
-   prefix=$(sudo python3 -c 'import json;print(json.load(open("state.json"))["volume_prefix"])')
-   release=$(sudo python3 -c 'import json;print(json.load(open("state.json"))["release"])')
-   mode=$(sudo python3 -c 'import json;print(json.load(open("config/install.json"))["mode"])')
-   sudo docker compose --project-name "$prefix" --env-file compose.env \
-     -f "releases/$release/compose.yaml" -f "releases/$release/compose.$mode.yaml" \
-     exec -T postgres sh -c 'PGPASSWORD="$(cat /run/secrets/bootstrap_password)" psql -X -v ON_ERROR_STOP=1 -U pgfy_bootstrap -d pgfy_system' <<'SQL'
-   ALTER ROLE app_xxxxxxxxxxxx NOLOGIN;
-   SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'app_xxxxxxxxxxxx';
-   SQL
-   ```
-   Replace `app_xxxxxxxxxxxx` with the database's user from its Connect tab. The dashboard does not know about this
-   change: it still lists the database as ready. Do not revoke `CONNECT` or drop anything: backups run as the management role through the database's owner role and
-   would start failing.
-3. Backups of the retired database keep running and keep being pruned by retention, which is intended while its data is
-   kept. Its connection check in the dashboard now fails.
-
-Deletion as a supported job is planned; until then, retire rather than drop.
+A deletion that stops (PostgreSQL unreachable, for example) is shown on the database's page with the reason, alerted
+once, and retried every 15 minutes or at once with **Retry now**.
 
 ## Backup target interval, agreed with each client
 

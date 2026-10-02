@@ -16,7 +16,17 @@ not claims: they are the work left.
 | Maintenance ownership for the app, PostgreSQL, images, Docker and host OS | [Host runbook](host-runbook.md) table | **Pending:** write the named owner into each row |
 | Fresh-server recovery using only the runbook and independently retained information | Integration covers the mechanism | **Pending:** repeat the full [recovery runbook](recovery-runbook.md) on a replacement server and record the time |
 | Acceptable data loss and recovery time for the first application | Backup target interval and newest-recoverable age are visible and alerted | **Pending:** agree the numbers with the application owner and check the rehearsal meets them |
-| Resource use under the intended workload during backup and restore | Connection budget and host status are reported | **Pending:** measure CPU, memory, disk workspace, log growth and connections during a backup and a restore of the real dataset |
+| Resource use under the intended workload during backup and restore | Connection budget and host status are reported; PostgreSQL memory is sized from the host (integration checks the values PostgreSQL reports) | **Pending:** measure CPU, memory, disk workspace, log growth and connections during a backup and a restore of the real dataset |
 | Run one low-stakes application for at least two weeks with alerts observed | — | **Pending** |
+
+Tier 1 additions also owe evidence from a real host; none of it is claimed yet:
+
+- **Pending:** delete a throwaway database on the production host while an application holds a session, and see the
+  database, user and access rule gone and its backups still listed under Backups.
+- **Pending:** export the recovery kit over SSH with `umask 077`, check its permissions and contents, and on a test host
+  put a daily copy back with the runbook's steps.
+- **Pending:** set a preferred backup hour and see the next scheduled backups start at it for a few days.
+- **Pending:** after the update that ships this release, check `SHOW shared_buffers` on the production host against
+  the host's memory, and watch memory during a backup of the real dataset (row above).
 
 When every row is Done, remove the "hackathon MVP" wording from the README and merge the branch.

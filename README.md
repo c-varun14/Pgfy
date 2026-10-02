@@ -21,14 +21,16 @@ The implementation is a Go application with an embedded React dashboard, SQLite 
 - Alerts to one JSON webhook (Slack-compatible) for failing or late backups, PostgreSQL down, low disk, clock drift, certificate expiry, connection pressure and more, each at most daily with a resolved message.
 - Host status (disk, clock, certificate expiry) reported every five minutes and shown in Settings; unattended security updates; a [host runbook](docs/host-runbook.md).
 - Host-side updates with `pgfyctl update`: jobs paused, SQLite and configuration snapshotted, readiness verified, and an automatic rollback to the previous release on any failure. See [Updating](docs/installation.md#updating).
+- Database deletion as a durable job: the name typed to confirm, a recent backup or an explicit acknowledgment, logins disabled and sessions ended, database, user and access rule dropped; it resumes after a restart. Bucket backups stay under retention.
+- A recovery kit (`pgfyctl export-recovery-kit`) and daily copies of management storage, for damaged metadata on a surviving server; a preferred hour for daily backups; PostgreSQL memory sized from the host.
 - Recovery on a fresh install from the bucket alone: checksum, version compatibility, restore into a new project, named verification checks reported as verified, partly verified or not verified, credential handoff. See the [recovery runbook](docs/recovery-runbook.md).
 
 ## Planned, not implemented
 
-- Project deletion and the other Tier 1 items, and the evidence still owed to the
-  [production gate](docs/production-gate.md), from the post-hackathon
+- The evidence still owed to the [production gate](docs/production-gate.md), from the post-hackathon
   [production-readiness roadmap](docs/phases.md#phase-6--post-demo-hardening-and-operation) (Phase 6). That work happens on the
   `mvp-to-production` branch; `main` is the hackathon submission.
+- Deferred to Tier 2 to keep a one-administrator tool simple: weekly automated restore verification, bundle signing, Slack/Discord adapters and SMTP, and an audit view ([why, and what would bring each back](docs/phases.md#tier-1--during-the-first-month-of-operation)).
 - The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.
 
 This is a hackathon MVP with production-shaped foundations, not a production-ready service; complete the Phase 6 roadmap and gate in [the phases document](docs/phases.md#phase-6--post-demo-hardening-and-operation) before real workloads.

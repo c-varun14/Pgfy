@@ -1,5 +1,22 @@
 # Release notes
 
+## Unreleased — Tier 1 (`mvp-to-production`)
+
+- **Delete a database** from its page (or `DELETE /api/v1/projects/{id}`): type its name; without a recoverable backup
+  newer than the backup interval, accept the loss explicitly. A durable job disables logins, ends sessions, drops the
+  database and user, removes the access rule and the records; it resumes after a restart and retries every 15 minutes
+  if it stops, alerting the first failure. Bucket backups stay under retention.
+- **Recovery kit:** `pgfyctl export-recovery-kit` writes the key, the PostgreSQL passwords, the installation identity
+  and a fresh copy of management storage as a tar.gz to stdout, for a password manager.
+- **Daily copies** of management storage in `data/sqlite/daily/`, the newest seven. Both cover damaged management
+  storage on a server whose PostgreSQL survived; a lost server is still recovered from the bucket alone.
+- **Preferred backup hour** for daily backups (Settings → Backups), stored in UTC and shown in your time.
+- **PostgreSQL memory:** `shared_buffers` and `effective_cache_size` are sized from the host's memory after 1 GiB of
+  headroom, applied by the update that ships this release.
+- CI builds its MinIO test store from source; the pinned community image is no longer served.
+- Deferred by decision (single administrator): weekly automated restore verification, bundle signing, Slack/Discord
+  adapters and SMTP (the webhook already serves Slack, and Discord through `/slack`), and an audit view.
+
 ## Unreleased — second factor (`mvp-to-production`)
 
 - HTTPS mode requires an authenticator-app code after the password; setup enrols the factor before the administrator
