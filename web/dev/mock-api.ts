@@ -50,7 +50,7 @@ function databaseGroups() {
       reconciled_at: now() - 60, backups: sorted.slice(0, 20) };
   });
 }
-type MockJob = Record<string, unknown> & { id: string; kind: "backup" | "restore"; project_id: string; state: string; stage: string; created_at: number; started_at: number; finished_at: number; stage_at: number; elapsed_seconds: number; error: string; result: Record<string, unknown> };
+type MockJob = Record<string, unknown> & { id: string; kind: "backup" | "restore" | "delete"; project_id: string; state: string; stage: string; created_at: number; started_at: number; finished_at: number; stage_at: number; elapsed_seconds: number; error: string; result: Record<string, unknown> };
 const jobs = new Map<string, MockJob>();
 
 function send(res: ServerResponse, status: number, body?: unknown) { res.statusCode = status; res.setHeader("Content-Type", "application/json"); res.end(body === undefined ? undefined : JSON.stringify(body)); }
@@ -120,6 +120,18 @@ export function mockApi(): Plugin {
     if (path === "/settings/alerts/test" && method === "POST") return send(res, 200, { ok: true });
     if (path === "/alerts") return send(res, 200, { conditions: [{ key: "backup_stale:prj_shop", kind: "backup_stale", summary: "The newest recoverable backup of shop is older than its target", detail: "Older than 1.5 times the backup target interval.", active: true, first_seen_at: now() - 7200, last_fired_at: now() - 7200, sent_state: "firing" }], delivery: { last_ok_at: now() - 7200, last_error: "" } });
     if (path === "/system/connections") { const roles = projects.filter((p) => p.stage === "ready").map((p) => ({ role: `app_${p.name}`, project: p.name, limit: (p.limits as { connection_limit: number }).connection_limit, connections: p.name === "shop" ? 21 : 0, warning: p.name === "shop" })); return send(res, 200, { max_connections: 150, superuser_reserved: 3, reserved: 10, available: 137, projects_used: 21, projects_limit: roles.reduce((sum, r) => sum + r.limit, 0), other_used: 0, warning: false, overcommitted: false, roles, system: [{ role: "pgfy_mgmt", limit: 8, connections: 2, warning: false }, { role: "pgfy_health", limit: 5, connections: 1, warning: false }] }); }
+    const removal = path.match(/^\/projects\/([^/]+)$/); if (removal && method === "DELETE") {
+      const input = await body(req) as { confirm_name?: string; acknowledge_no_recent_backup?: boolean }; const item = projects.find((p) => p.id === removal[1]); if (!item) return failure(res, 404, "not_found", "Project not found.");
+      if (item.stage !== "deleting") {
+        if (item.stage !== "ready" && !item.failed) return failure(res, 409, "not_deletable", "Wait until the database is ready or its setup has failed.");
+        if (input.confirm_name !== item.name) return failure(res, 400, "name_mismatch", "Type the database name exactly to confirm.");
+        const newest = Math.max(0, ...backups.filter((b) => b.project_id === item.id).map((b) => b.taken_at));
+        if (item.stage === "ready" && newest < now() - policy.target_interval_hours * 3600 && !input.acknowledge_no_recent_backup) return failure(res, 409, "backup_required", "There is no recoverable backup newer than the backup interval. Back up first, or confirm that data written since the last backup will be lost.");
+      }
+      Object.assign(item, { stage: "deleting", failed: false, deleting_at: now(), deletion: { started_at: now(), active: true } });
+      setTimeout(() => { projects = projects.filter((p) => p.id !== item.id); }, 3000);
+      return send(res, 202, { project: item, job: { id: `job_${Date.now()}`, kind: "delete", project_id: item.id, state: "queued", stage: "queued" } });
+    }
     const detail = path.match(/^\/projects\/([^/]+)$/); if (detail) { const item = projects.find((p) => p.id === detail[1]); return item ? send(res, 200, { project: item, database_access: { mode: direct ? "direct" : "tunnel", host: direct ? "db.demo.pgfy.dev" : "127.0.0.1", port: 5432, certificate: { state: direct ? "trusted" : "placeholder", issuer: direct ? "Let's Encrypt" : "" } } }) : failure(res, 404, "not_found", "Database not found."); }
     if (path === "/recovery/backups" && method === "GET") return send(res, 200, storageConfigured ? { state: "ok", databases: databaseGroups(), installation_id: "demo-installation", reconciled_at: now() - 60, busy: [...jobs.values()].some((j) => tick(j).state === "running"), restores: [...jobs.values()].filter((j) => j.kind === "restore").map(tick) } : { state: "storage_not_configured", databases: [], restores: [] });
     if (path === "/recovery/restores" && method === "POST") { const input = await body(req) as { manifest_key: string; name: string }; const restored = project(`prj_${Math.random().toString(36).slice(2, 10)}`, input.name, "ready", false, 0); projects = [restored, ...projects]; const job: MockJob = { id: `job_${Date.now()}`, kind: "restore", project_id: restored.id, state: "queued", stage: "queued", created_at: now(), started_at: now(), finished_at: 0, stage_at: now(), elapsed_seconds: 0, error: "", result: {} }; jobs.set(job.id, job); return send(res, 202, { project: restored, job }); }

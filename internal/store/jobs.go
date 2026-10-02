@@ -39,6 +39,8 @@ func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 
 // EnqueueJob records a heavy job. Only one backup/restore may be queued or
 // running at a time so the small host is never asked to do two dumps at once.
+// A deletion (BeginProjectDeletion) may queue behind another job: the worker
+// still runs one job at a time, oldest first.
 func (s *Store) EnqueueJob(ctx context.Context, id, kind, projectID, input string, now time.Time) (Job, error) {
 	return s.enqueue(ctx, id, kind, projectID, input, false, now)
 }
@@ -209,7 +211,11 @@ func (s *Store) InterruptRunningJobs(ctx context.Context, now time.Time, interva
 			return nil, e
 		}
 		// Recorded with the interruption itself, so a crash cannot lose the alert.
-		if e = RecordAlertEvent(ctx, tx, "job_interrupted", "job_interrupted:"+j.ID, "A "+j.Kind+" was interrupted by an application restart", "Job "+j.ID+" stopped at stage "+j.Stage+"; it was not completed.", now); e != nil {
+		outcome := "it was not completed."
+		if j.Kind == "delete" {
+			outcome = "the deletion resumes automatically."
+		}
+		if e = RecordAlertEvent(ctx, tx, "job_interrupted", "job_interrupted:"+j.ID, "A "+j.Kind+" was interrupted by an application restart", "Job "+j.ID+" stopped at stage "+j.Stage+"; "+outcome, now); e != nil {
 			return nil, e
 		}
 		if j.Kind == "backup" && j.Scheduled && j.ProjectID != "" {

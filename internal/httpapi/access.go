@@ -59,6 +59,10 @@ func (s *Server) putLimits(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	if p.Stage == "deleting" {
+		failure(w, 409, "deleting", "This database is being deleted.")
+		return
+	}
 	if e := in.Limits.Validate(); e != nil {
 		failure(w, 400, "invalid_limits", e.Error())
 		return

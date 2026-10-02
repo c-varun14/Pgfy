@@ -82,7 +82,8 @@ func (s *Store) BackupSchedule(ctx context.Context, projectID string) (BackupSch
 // BackupFailures returns every project that has a failing backup, so status can
 // distinguish "failing" from merely "stale".
 func (s *Store) BackupFailures(ctx context.Context) (map[string]BackupSchedule, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT project_id,last_attempt_at,failures,next_attempt_at FROM backup_schedule WHERE failures>0")
+	rows, e := s.DB.QueryContext(ctx, `SELECT b.project_id,b.last_attempt_at,b.failures,b.next_attempt_at FROM backup_schedule b
+		JOIN projects p ON p.id=b.project_id WHERE b.failures>0 AND p.stage<>'deleting'`)
 	if e != nil {
 		return nil, e
 	}

@@ -100,7 +100,7 @@ export function BackupsPage({ navigate }: { navigate: (to: string) => void }) {
         <span className="section-icon"><Database size={20} /></span>
         <span className="backup-card-title"><strong>{group.name}</strong><small className="mono">{group.dbName}</small></span>
         <span className="backup-card-summary">
-          {group.latest ? <>{ageLabel(group)}<span>· {discovered?.count ?? group.backups.length} backup{(discovered?.count ?? group.backups.length) === 1 ? "" : "s"}</span><span>· {formatBytes(group.totalBytes)}</span></> : group.project ? (group.project.failed ? "Database needs attention" : group.project.stage === "ready" ? `No backups yet · ${intervalLabel.toLowerCase()} backups start within a few minutes` : "Database is still being set up") : "No backups"}
+          {group.latest ? <>{ageLabel(group)}<span>· {discovered?.count ?? group.backups.length} backup{(discovered?.count ?? group.backups.length) === 1 ? "" : "s"}</span><span>· {formatBytes(group.totalBytes)}</span></> : group.project ? (group.project.stage === "deleting" ? "Database is being deleted" : group.project.failed ? "Database needs attention" : group.project.stage === "ready" ? `No backups yet · ${intervalLabel.toLowerCase()} backups start within a few minutes` : "Database is still being set up") : "No backups"}
           {group.foreign && <Pill tone="neutral">From another server</Pill>}
           {discovered?.mixed && <Pill tone="neutral">Several servers use this folder</Pill>}
           {!!discovered?.manifest_only && <Pill tone="wait">{discovered.manifest_only} incomplete</Pill>}

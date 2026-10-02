@@ -351,6 +351,41 @@ func (m *Management) TerminateSessions(ctx context.Context, database, role strin
 	return e
 }
 
+// DropProject removes a project's database and role. Logins are disabled
+// first so nothing reconnects, every session of the role or on the database is
+// ended, and the drops are idempotent so an interrupted deletion can simply be
+// run again. pgfy_mgmt created the role and inherits its membership, which
+// makes it the database owner for DROP DATABASE, and its ADMIN OPTION on the
+// role is what DROP ROLE requires.
+func (m *Management) DropProject(ctx context.Context, database, role string) error {
+	if !ValidName(database) || !ValidName(role) {
+		return errors.New("invalid project identity")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	name := pgx.Identifier{role}.Sanitize()
+	var exists bool
+	if e := m.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)", role).Scan(&exists); e != nil {
+		return e
+	}
+	if exists {
+		if _, e := m.Pool.Exec(ctx, "ALTER ROLE "+name+" NOLOGIN"); e != nil {
+			return fmt.Errorf("logins could not be disabled: %w", e)
+		}
+	}
+	if _, e := m.Pool.Exec(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+		WHERE (usename=$1 OR datname=$2) AND backend_type='client backend' AND pid<>pg_backend_pid()`, role, database); e != nil {
+		return fmt.Errorf("sessions could not be ended: %w", e)
+	}
+	if _, e := m.Pool.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{database}.Sanitize()+" WITH (FORCE)"); e != nil {
+		return fmt.Errorf("the database could not be dropped: %w", e)
+	}
+	if _, e := m.Pool.Exec(ctx, "DROP ROLE IF EXISTS "+name); e != nil {
+		return fmt.Errorf("the database user could not be dropped: %w", e)
+	}
+	return nil
+}
+
 type Connection struct {
 	ClientAddr      string    `json:"client_addr"`
 	TLS             bool      `json:"tls"`

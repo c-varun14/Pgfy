@@ -25,6 +25,7 @@ func (noRoles) RoleStates(context.Context) (map[string]postgres.RoleState, error
 func (noRoles) ResetDatabaseLimits(context.Context, string, string, []string) error { return nil }
 func (noRoles) SetPassword(context.Context, string, string) error                   { return nil }
 func (noRoles) TerminateSessions(context.Context, string, string) error             { return nil }
+func (noRoles) DropProject(context.Context, string, string) error                   { return nil }
 
 func (f *fixture) withProvisioner(t *testing.T) {
 	f.s.Provisioner = provision.New(f.s.Store, f.s.Vault, noRoles{}, nil)

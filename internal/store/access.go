@@ -177,7 +177,9 @@ func (s *Store) LimitsFailed(ctx context.Context, projectID, reason string) erro
 // earlier pending password is safe only because every rotation step for a
 // project runs under the provisioner's per-project rotation lock.
 func (s *Store) BeginRotation(ctx context.Context, projectID, sealed, requestID string) error {
-	r, e := s.DB.ExecContext(ctx, "UPDATE project_secrets SET pending_password_sealed=?, pending_request_id=? WHERE project_id=?", sealed, requestID, projectID)
+	// Only a ready project: a deletion may have started since the request checked.
+	r, e := s.DB.ExecContext(ctx, `UPDATE project_secrets SET pending_password_sealed=?, pending_request_id=? WHERE project_id=?
+		AND EXISTS(SELECT 1 FROM projects WHERE id=project_secrets.project_id AND stage='ready')`, sealed, requestID, projectID)
 	if e != nil {
 		return e
 	}
@@ -203,7 +205,9 @@ type PendingRotation struct {
 }
 
 func (s *Store) PendingRotations(ctx context.Context) ([]PendingRotation, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT project_id, pending_request_id, pending_password_sealed FROM project_secrets WHERE pending_password_sealed IS NOT NULL")
+	// A project being deleted has no role left to finish the change on.
+	rows, e := s.DB.QueryContext(ctx, `SELECT s.project_id, s.pending_request_id, s.pending_password_sealed FROM project_secrets s
+		JOIN projects p ON p.id=s.project_id WHERE s.pending_password_sealed IS NOT NULL AND p.stage<>'deleting'`)
 	if e != nil {
 		return nil, e
 	}

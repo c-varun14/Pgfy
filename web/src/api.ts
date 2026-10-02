@@ -108,7 +108,7 @@ export type Project = {
   name: string;
   db_name: string;
   role_name: string;
-  stage: "identity_persisted" | "role_created" | "database_created" | "ready";
+  stage: "identity_persisted" | "role_created" | "database_created" | "ready" | "deleting";
   failed: boolean;
   stage_error: string;
   created_at: number;
@@ -124,6 +124,10 @@ export type Project = {
   /** A password change was recorded but not yet confirmed by PostgreSQL. */
   rotation_pending?: boolean;
   limits?: ProjectLimits;
+  /** Unix seconds since deletion was requested; 0 otherwise. */
+  deleting_at: number;
+  /** Present while the project is being deleted. */
+  deletion?: { started_at: number; active: boolean; last_error?: string };
 };
 export type Limits = {
   statement_timeout_ms: number;
@@ -192,7 +196,7 @@ export type BackupPolicy = {
 export type CheckStep = { name: string; ok: boolean; error?: string; detail?: string };
 export type Job = {
   id: string;
-  kind: "backup" | "restore";
+  kind: "backup" | "restore" | "delete";
   project_id: string;
   state: "queued" | "running" | "succeeded" | "failed" | "interrupted";
   stage: string;

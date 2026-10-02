@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/c-varun14/Pgfy/internal/hba"
+	"github.com/c-varun14/Pgfy/internal/jobs"
 	"github.com/c-varun14/Pgfy/internal/postgres"
 	"github.com/c-varun14/Pgfy/internal/security"
 	"github.com/c-varun14/Pgfy/internal/store"
@@ -67,6 +68,15 @@ type projectView struct {
 	SizeError       string                `json:"size_error,omitempty"`
 	Policy          *store.PolicyState    `json:"policy,omitempty"`
 	Connections     []postgres.Connection `json:"connections_now,omitempty"`
+	Deletion        *deletionView         `json:"deletion,omitempty"`
+}
+
+// deletionView reports a deletion in progress, and why the last attempt
+// stopped if it did.
+type deletionView struct {
+	StartedAt int64  `json:"started_at"`
+	Active    bool   `json:"active"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 func (s *Server) projectSummary(r *http.Request, p store.Project) projectView {
@@ -77,6 +87,16 @@ func (s *Server) projectSummary(r *http.Request, p store.Project) projectView {
 			_ = json.Unmarshal(st.Addresses, &addresses)
 			view.OpenToInternet = openToInternet(addresses)
 		}
+	}
+	if p.Stage == "deleting" {
+		view.Deletion = &deletionView{StartedAt: p.DeletingAt}
+		if job, e := s.Store.LastDeleteJob(r.Context(), p.ID); e == nil && job != nil {
+			view.Deletion.Active = job.State == "queued" || job.State == "running"
+			if job.State == "failed" || job.State == "interrupted" {
+				view.Deletion.LastError = job.Error
+			}
+		}
+		return view
 	}
 	if pending, e := s.Store.PendingPassword(r.Context(), p.ID); e == nil {
 		view.RotationPending = pending != ""
@@ -284,6 +304,10 @@ func (s *Server) updateAccess(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
+	if p.Stage == "deleting" {
+		failure(w, 409, "deleting", "This database is being deleted.")
+		return
+	}
 	normalized, e := hba.Normalize(in.Addresses)
 	if e != nil {
 		failure(w, 400, "invalid_addresses", e.Error())
@@ -422,4 +446,87 @@ func (s *Server) getConnectionCheck(w http.ResponseWriter, r *http.Request) {
 		out["evidence"] = json.RawMessage(check.Evidence)
 	}
 	write(w, 200, out)
+}
+
+// deleteProject marks a project for deletion and queues the job that removes
+// its database, user and records. The exact name confirms the intent, and a
+// database with data needs a recent recoverable backup or an explicit
+// acknowledgment that what was written since will be lost. Asking again for a
+// project already being deleted retries a deletion that stopped.
+func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := s.authorize(w, r); !ok || !s.jobsReady(w) {
+		return
+	}
+	if s.Provisioner == nil {
+		failure(w, 503, "postgres_unavailable", "Project provisioning is unavailable on this installation. Run host diagnostics.")
+		return
+	}
+	p, ok := s.project(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		ConfirmName string `json:"confirm_name"`
+		Acknowledge bool   `json:"acknowledge_no_recent_backup"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	acknowledged := false
+	if p.Stage != "deleting" {
+		if p.Stage != "ready" && !p.Failed {
+			failure(w, 409, "not_deletable", "Wait until the database is ready or its setup has failed.")
+			return
+		}
+		if in.ConfirmName != p.Name {
+			failure(w, 400, "name_mismatch", "Type the database name exactly to confirm.")
+			return
+		}
+		if p.Stage == "ready" && !s.recentlyBackedUp(r, p) {
+			if !in.Acknowledge {
+				failure(w, 409, "backup_required", "There is no recoverable backup newer than the backup interval. Back up first, or confirm that data written since the last backup will be lost.")
+				return
+			}
+			acknowledged = true
+		}
+	}
+	entry := s.auditEntry(w, "project.delete", p.ID, map[string]any{"name": p.Name, "acknowledged_without_backup": acknowledged})
+	job, _, e := s.Store.BeginProjectDeletion(r.Context(), p.ID, jobs.NewDeleteJob, entry, s.Now())
+	switch {
+	case errors.Is(e, store.ErrMaintenance):
+		failure(w, 503, "maintenance", "An update is in progress. Try again when it finishes.")
+		return
+	case errors.Is(e, store.ErrNotDeletable):
+		failure(w, 409, "not_deletable", "Wait until the database is ready or its setup has failed.")
+		return
+	case errors.Is(e, store.ErrProjectNotFound):
+		failure(w, 404, "not_found", "Project not found.")
+		return
+	case e != nil:
+		failure(w, 503, "metadata_unavailable", "The deletion could not be saved.")
+		return
+	}
+	s.Jobs.Kick()
+	if updated, e := s.Store.Project(r.Context(), p.ID); e == nil {
+		p = updated
+	}
+	write(w, 202, map[string]any{"project": s.projectSummary(r, p), "job": s.jobView(job)})
+}
+
+// recentlyBackedUp reports whether the bucket holds a recoverable backup of
+// the project newer than the backup interval.
+func (s *Server) recentlyBackedUp(r *http.Request, p store.Project) bool {
+	configured, target := s.storageTarget(r)
+	if !configured {
+		return false
+	}
+	policy, e := s.Store.BackupPolicy(r.Context())
+	if e != nil {
+		return false
+	}
+	newest, e := s.Store.NewestRecoverable(r.Context(), target, s.Config.ID)
+	if e != nil {
+		return false
+	}
+	return newest[p.ID] > s.Now().Add(-policy.Interval()).Unix()
 }

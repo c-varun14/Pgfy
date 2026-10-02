@@ -21,14 +21,15 @@ type Project struct {
 	StageError string `json:"stage_error"`
 	CreatedAt  int64  `json:"created_at"`
 	ReadyAt    int64  `json:"ready_at"`
-	FrozenAt   int64  `json:"frozen_at"` // unix seconds while writes are frozen, else 0
+	FrozenAt   int64  `json:"frozen_at"`   // unix seconds while writes are frozen, else 0
+	DeletingAt int64  `json:"deleting_at"` // unix seconds since deletion was requested, else 0
 }
 
 func (s *Store) scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var p Project
-	var ready, frozen sql.NullInt64
+	var ready, frozen, deleting sql.NullInt64
 	var failed int
-	e := row.Scan(&p.ID, &p.Name, &p.DBName, &p.RoleName, &p.Stage, &failed, &p.StageError, &p.CreatedAt, &ready, &frozen)
+	e := row.Scan(&p.ID, &p.Name, &p.DBName, &p.RoleName, &p.Stage, &failed, &p.StageError, &p.CreatedAt, &ready, &frozen, &deleting)
 	p.Failed = failed != 0
 	if ready.Valid {
 		p.ReadyAt = ready.Int64
@@ -36,10 +37,13 @@ func (s *Store) scanProject(row interface{ Scan(...any) error }) (Project, error
 	if frozen.Valid {
 		p.FrozenAt = frozen.Int64
 	}
+	if deleting.Valid {
+		p.DeletingAt = deleting.Int64
+	}
 	return p, e
 }
 
-const projectCols = "id,name,db_name,role_name,stage,failed,stage_error,created_at,ready_at,frozen_at"
+const projectCols = "id,name,db_name,role_name,stage,failed,stage_error,created_at,ready_at,frozen_at,deleting_at"
 
 // CreateProject persists identity and sealed credentials atomically; a repeated
 // idempotency key returns the existing project with created=false.
@@ -110,9 +114,10 @@ func (s *Store) Projects(ctx context.Context) ([]Project, error) {
 }
 
 // IncompleteProjects returns projects the reconciler still owes work:
-// ready projects are done; failed projects wait for an explicit retry.
+// ready projects are done; failed projects wait for an explicit retry, and a
+// project marked for deletion is never provisioned again.
 func (s *Store) IncompleteProjects(ctx context.Context) ([]Project, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT "+projectCols+" FROM projects WHERE failed=0 AND stage<>'ready' ORDER BY created_at, id")
+	rows, e := s.DB.QueryContext(ctx, "SELECT "+projectCols+" FROM projects WHERE failed=0 AND stage NOT IN ('ready','deleting') ORDER BY created_at, id")
 	if e != nil {
 		return nil, e
 	}
@@ -128,17 +133,18 @@ func (s *Store) IncompleteProjects(ctx context.Context) ([]Project, error) {
 	return out, rows.Err()
 }
 
+// SetProjectStage and FailProject never overwrite the deletion tombstone.
 func (s *Store) SetProjectStage(ctx context.Context, id, stage string, now time.Time) error {
 	if stage == "ready" {
-		_, e := s.DB.ExecContext(ctx, "UPDATE projects SET stage=?, ready_at=? WHERE id=?", stage, now.Unix(), id)
+		_, e := s.DB.ExecContext(ctx, "UPDATE projects SET stage=?, ready_at=? WHERE id=? AND stage<>'deleting'", stage, now.Unix(), id)
 		return e
 	}
-	_, e := s.DB.ExecContext(ctx, "UPDATE projects SET stage=? WHERE id=?", stage, id)
+	_, e := s.DB.ExecContext(ctx, "UPDATE projects SET stage=? WHERE id=? AND stage<>'deleting'", stage, id)
 	return e
 }
 
 func (s *Store) FailProject(ctx context.Context, id, stageError string) error {
-	_, e := s.DB.ExecContext(ctx, "UPDATE projects SET failed=1, stage_error=? WHERE id=?", stageError, id)
+	_, e := s.DB.ExecContext(ctx, "UPDATE projects SET failed=1, stage_error=? WHERE id=? AND stage<>'deleting'", stageError, id)
 	return e
 }
 

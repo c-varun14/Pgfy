@@ -31,6 +31,7 @@ type Roles interface {
 	ResetDatabaseLimits(ctx context.Context, role, database string, keys []string) error
 	SetPassword(ctx context.Context, role, password string) error
 	TerminateSessions(ctx context.Context, database, role string) error
+	DropProject(ctx context.Context, database, role string) error
 }
 
 type Provisioner struct {
@@ -40,16 +41,18 @@ type Provisioner struct {
 	HBA   *hba.Manager
 	kick  chan struct{}
 
-	locks  sync.Map   // project ID → *sync.Mutex guarding every rotation step
+	locks  sync.Map   // project ID → *sync.Mutex guarding provisioning, rotation and deletion steps
 	limits sync.Mutex // one limits sync at a time, so an older revision never lands after a newer one
+	policy sync.Mutex // one policy sync at a time, so a stale project list never lands after a newer one
 }
 
 func New(s *store.Store, v *security.Vault, pg Roles, h *hba.Manager) *Provisioner {
 	return &Provisioner{Store: s, Vault: v, PG: pg, HBA: h, kick: make(chan struct{}, 1)}
 }
 
-// RotationLock serialises everything that changes a project's password: the
-// dashboard's rotate request and the loop that finishes interrupted ones.
+// RotationLock serialises everything that changes a project's role: the
+// dashboard's rotate request, the loop that finishes interrupted ones,
+// provisioning, and deletion.
 func (p *Provisioner) RotationLock(projectID string) *sync.Mutex {
 	lock, _ := p.locks.LoadOrStore(projectID, &sync.Mutex{})
 	return lock.(*sync.Mutex)
@@ -113,7 +116,24 @@ func (p *Provisioner) pass(ctx context.Context) {
 
 // provision advances one project to ready; every stage is idempotent and
 // transient PostgreSQL errors are retried before the project is marked failed.
-func (p *Provisioner) provision(ctx context.Context, project store.Project) error {
+// It holds the project's lock and re-reads the project under it, so a project
+// that failed or was marked for deletion meanwhile is never created again.
+func (p *Provisioner) provision(ctx context.Context, listed store.Project) error {
+	lock := p.RotationLock(listed.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	project, e := p.Store.Project(ctx, listed.ID)
+	if e != nil {
+		return e
+	}
+	if project.Stage == "deleting" || project.Failed {
+		return nil
+	}
+	switch project.Stage {
+	case "identity_persisted", "role_created", "database_created", "ready":
+	default:
+		return fmt.Errorf("unexpected stage %q", project.Stage)
+	}
 	sealed, e := p.Store.SealedPassword(ctx, project.ID)
 	if e != nil {
 		return e
@@ -209,6 +229,8 @@ func (p *Provisioner) ProvisionNow(ctx context.Context, projectID string) error 
 // SyncPolicy renders every ready project's current revision into the managed
 // rule file and records per-project outcomes truthfully.
 func (p *Provisioner) SyncPolicy(ctx context.Context) error {
+	p.policy.Lock()
+	defer p.policy.Unlock()
 	projects, e := p.Store.Projects(ctx)
 	if e != nil {
 		return e

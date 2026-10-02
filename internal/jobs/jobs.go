@@ -149,6 +149,7 @@ func (w *Worker) Run(ctx context.Context) {
 	// The bucket is the truth about what is recoverable, so it is read before
 	// the first scheduling decision rather than after it.
 	w.Reconcile(ctx)
+	w.resumeDeletions(ctx)
 	w.scheduleBackups(ctx)
 	for {
 		w.drain(ctx)
@@ -163,6 +164,7 @@ func (w *Worker) Run(ctx context.Context) {
 			}
 		case <-reconcile.C:
 			w.Reconcile(ctx)
+			w.resumeDeletions(ctx)
 			w.scheduleBackups(ctx)
 		case <-schedule.C:
 			w.scheduleBackups(ctx)
@@ -197,6 +199,8 @@ func (w *Worker) execute(ctx context.Context, job store.Job) {
 		result, record, e = w.runBackup(ctx, job)
 	case "restore":
 		result, e = w.runRestore(ctx, job)
+	case "delete":
+		result, e = w.runDelete(ctx, job)
 	default:
 		e = errors.New("unknown job kind")
 	}
@@ -211,6 +215,17 @@ func (w *Worker) execute(ctx context.Context, job store.Job) {
 		slog.Warn("job failed", "job", job.ID, "kind", job.Kind, "stage", current.Stage, "reason", e.Error())
 		state, stage, message = "failed", current.Stage, e.Error()
 		record = nil
+	}
+	if job.Kind == "delete" {
+		// A successful deletion finished its job together with the row removal.
+		if e != nil {
+			var in deleteInput
+			_ = json.Unmarshal([]byte(job.Input), &in)
+			if e := w.Store.FailDeleteJob(ctx, job.ID, in.ProjectID, in.Name, stage, message, string(encoded), w.now()); e != nil {
+				slog.Error("job result could not be recorded", "job", job.ID, "reason", e.Error())
+			}
+		}
+		return
 	}
 	if job.Kind != "backup" {
 		_ = w.Store.FinishJob(ctx, job.ID, state, stage, message, string(encoded), w.now())
@@ -468,6 +483,9 @@ func (w *Worker) runRestore(ctx context.Context, job store.Job) (RestoreResult, 
 	project, e := w.Store.Project(ctx, in.ProjectID)
 	if e != nil {
 		return result, e
+	}
+	if project.Stage != "ready" {
+		return result, errors.New("the target project is not ready; it may have been deleted")
 	}
 	passfile, e := w.passfile()
 	if e != nil {

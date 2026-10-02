@@ -21,6 +21,8 @@ type fakeRoles struct {
 	states      map[string]postgres.RoleState
 	passwords   map[string]string
 	terminated  []string
+	dropped     []string
+	failDrop    error
 	failSetPass error
 	beforeSet   func() // runs inside SetPassword before it takes effect
 	applies     int
@@ -88,6 +90,14 @@ func (f *fakeRoles) SetPassword(ctx context.Context, role, password string) erro
 	f.passwords[role] = password
 	return nil
 }
+func (f *fakeRoles) DropProject(ctx context.Context, database, role string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.states, role)
+	delete(f.passwords, role)
+	f.dropped = append(f.dropped, role)
+	return f.failDrop
+}
 func (f *fakeRoles) TerminateSessions(ctx context.Context, database, role string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -109,13 +119,7 @@ func fixture(t *testing.T) (*Provisioner, *fakeRoles, store.Project) {
 	if _, _, e := s.CreateProject(context.Background(), project, "key", v.Seal("project:"+project.ID, []byte(security.Token())), time.Now()); e != nil {
 		t.Fatal(e)
 	}
-	for _, stage := range []string{"role_created", "database_created"} {
-		if e := s.SetProjectStage(context.Background(), project.ID, stage, time.Now()); e != nil {
-			t.Fatal(e)
-		}
-	}
-	project.Stage = "database_created"
-	if e := p.provision(context.Background(), store.Project{ID: project.ID, RoleName: project.RoleName, DBName: project.DBName, Stage: "identity_persisted"}); e != nil {
+	if e := p.provision(context.Background(), project); e != nil {
 		t.Fatal(e)
 	}
 	project.Stage = "ready"
@@ -276,5 +280,29 @@ func TestMaintenanceSkipsRotationsAndLimits(t *testing.T) {
 	}
 	if roles.states[project.RoleName].Settings["statement_timeout"] != "0" {
 		t.Fatal("limits were applied during maintenance")
+	}
+}
+
+// A provisioning pass that listed a project before it was marked for deletion
+// re-reads it under the project's lock and leaves it alone.
+func TestProvisionSkipsProjectMarkedForDeletion(t *testing.T) {
+	p, roles, _ := fixture(t)
+	ctx := context.Background()
+	stale := store.Project{ID: "prj_000000000009", Name: "Late", DBName: "app_000000000009", RoleName: "app_000000000009"}
+	if _, _, e := p.Store.CreateProject(ctx, stale, "key9", p.Vault.Seal("project:"+stale.ID, []byte(security.Token())), time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	listed, _ := p.Store.IncompleteProjects(ctx)
+	p.Store.FailProject(ctx, stale.ID, "boom")
+	if _, _, e := p.Store.BeginProjectDeletion(ctx, stale.ID, func(store.Project) (string, string) { return "job_x", "{}" }, store.AuditEntry{Action: "project.delete"}, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	for _, project := range listed {
+		if e := p.provision(ctx, project); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, ok := roles.states[stale.RoleName]; ok {
+		t.Fatal("a role was created for a project marked for deletion")
 	}
 }

@@ -13,6 +13,7 @@ import { Skeleton } from "../components/ui/skeleton";
 import { EmptyArt } from "../components/ui/empty-art";
 
 export function databaseStage(project: Project) {
+  if (project.stage === "deleting") return { tone: "wait" as const, label: "Deleting…" };
   if (project.failed) return { tone: "bad" as const, label: "Needs attention" };
   if (project.stage === "ready" && project.frozen_at) return { tone: "neutral" as const, label: "Writes frozen" };
   if (project.stage === "ready") return { tone: "good" as const, label: "Ready" };
