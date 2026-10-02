@@ -545,8 +545,8 @@ def main():
                     if sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{doubtful_db}';") != "0":
                         break
                     time.sleep(1)
-                code, started = request(doubtful_path, {"confirm_name": "Shop doubtful", "acknowledge_no_recent_backup": True}, session["csrf_token"], "DELETE")
-                assert code == 202 and started["project"]["stage"] == "deleting" and started["job"]["kind"] == "delete", (code, started)
+                code, deletion_request = request(doubtful_path, {"confirm_name": "Shop doubtful", "acknowledge_no_recent_backup": True}, session["csrf_token"], "DELETE")
+                assert code == 202 and deletion_request["project"]["stage"] == "deleting" and deletion_request["job"]["kind"] == "delete", (code, deletion_request)
                 for _ in range(180):
                     if request(doubtful_path)[0] == 404:
                         break
