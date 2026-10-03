@@ -465,11 +465,24 @@ func (s *Server) startRestore(w http.ResponseWriter, r *http.Request) {
 	suffix := hex.EncodeToString([]byte(security.Token()))[:12]
 	project := store.Project{ID: "prj_" + suffix, Name: in.Name, DBName: "app_" + suffix, RoleName: "app_" + suffix}
 	password := security.Token()
-	key := security.Hash(session.Email + "|restore|" + in.ManifestKey + "|" + s.Now().Truncate(time.Minute).Format(time.RFC3339))
-	created, _, e := s.Store.CreateProject(r.Context(), project, key, s.Vault.Seal("project:"+project.ID, []byte(password)), s.Now())
+	// The key only absorbs a repeated submission of the same request; a different name is a different restore.
+	key := security.Hash(session.Email + "|restore|" + in.ManifestKey + "|" + in.Name + "|" + s.Now().Truncate(time.Minute).Format(time.RFC3339))
+	created, isNew, e := s.Store.CreateProject(r.Context(), project, key, s.Vault.Seal("project:"+project.ID, []byte(password)), s.Now())
 	if e != nil {
 		failure(w, 503, "metadata_unavailable", "The target project could not be saved.")
 		return
+	}
+	if !isNew {
+		// A replay never restores into the project again: once it has a restore job, that job is the answer.
+		existing, e := s.Store.ProjectJobs(r.Context(), created.ID, 1)
+		if e != nil {
+			failure(w, 503, "metadata_unavailable", "The restore could not be read.")
+			return
+		}
+		if len(existing) > 0 && existing[0].Kind == "restore" {
+			write(w, 202, map[string]any{"project": created, "job": s.jobView(existing[0])})
+			return
+		}
 	}
 	input, _ := json.Marshal(map[string]string{"manifest_key": in.ManifestKey, "name": in.Name, "project_id": created.ID})
 	job, e := s.Store.EnqueueJob(r.Context(), "job_"+security.Token()[:16], "restore", created.ID, string(input), s.Now())
