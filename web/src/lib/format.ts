@@ -40,6 +40,9 @@ export function formatDateTime(seconds: number) {
 
 export const STAGE_LABELS: Record<string, string> = {
   queued: "Waiting for its turn",
+  drop_database: "Removing the database and its user",
+  access_policy: "Updating access rules",
+  remove_records: "Removing records",
   starting: "Starting",
   preparing: "Checking storage and disk space",
   snapshot: "Taking a consistent snapshot",

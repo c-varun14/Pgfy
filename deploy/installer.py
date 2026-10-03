@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -11,11 +12,14 @@ from pathlib import Path
 import platform
 import re
 import secrets
+import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.request
@@ -29,9 +33,9 @@ DIGEST = re.compile(r"[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}\Z")
 class InstallError(Exception):
     pass
 
-def run(args, *, timeout=60, capture=True, check=True, input=None):
+def run(args, *, timeout=60, capture=True, check=True, input=None, pass_fds=()):
     try:
-        result = subprocess.run([str(a) for a in args], input=input, text=True, capture_output=capture, timeout=timeout, check=False)
+        result = subprocess.run([str(a) for a in args], input=input, text=True, capture_output=capture, timeout=timeout, check=False, pass_fds=pass_fds)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise InstallError(f"{args[0]} failed or timed out; check prerequisites and connectivity.") from error
     if check and result.returncode:
@@ -72,16 +76,30 @@ def atomic(path, data, mode=0o600, uid=None, gid=None):
 def json_write(path, value, mode=0o600):
     atomic(path, json.dumps(value, indent=2) + "\n", mode)
 
+def lock_path(root):
+    return "/run/lock/pgfy-" + hashlib.sha256(str(root).encode()).hexdigest()[:16] + ".lock"
+
 @contextlib.contextmanager
 def locked(root):
     # The lock lives outside install state, so even two first-time runs serialize.
-    lock_path = "/run/lock/pgfy-" + hashlib.sha256(str(root).encode()).hexdigest()[:16] + ".lock"
-    with open(lock_path, "a") as lock:
+    with open(lock_path(root), "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise InstallError("Another installer or host command is running.") from error
-        yield
+        yield lock.fileno()
+
+def holds_lock(root, fd):
+    """True only when fd is an open description of this installation's lock that already holds it."""
+    try:
+        opened, expected = os.fstat(fd), os.stat(lock_path(root))
+        if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            return False
+        # Succeeds without blocking only for the description that holds the lock.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
 
 def valid_hostname(hostname):
     if not hostname or len(hostname) > 253 or not HOSTNAME.fullmatch(hostname):
@@ -147,13 +165,46 @@ def placeholder_certificate(directory):
         atomic(directory / "server.crt", (work / "server.crt").read_bytes(), 0o644, 999, 999)
     json_write(directory / "state.json", {"state": "placeholder", "source": "self-signed", "issuer": "", "not_after": "", "fingerprint": ""}, 0o644)
 
+def host_memory_mib():
+    return int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:"))) // 1024
+
+def postgres_memory(total_mib):
+    """PostgreSQL memory from measured host memory, after 1 GiB for the OS, Docker, Caddy, the application and its
+    pg_dump/pg_restore processes: a quarter of the rest for shared_buffers, three quarters as the planner's
+    effective_cache_size. About 200 MB and 620 MB on the 2 GiB validation host."""
+    rest = total_mib - 1024
+    return min(max(rest // 4, 128), 8192), max(rest * 3 // 4, 256)
+
+MEMORY_KEYS = ("PG_SHARED_BUFFERS", "PG_EFFECTIVE_CACHE_SIZE")
+
+def without_memory(env):
+    """compose.env without the measured memory lines, which legitimately change when the server is resized."""
+    return "".join(line for line in env.splitlines(keepends=True) if line.split("=", 1)[0] not in MEMORY_KEYS)
+
 def compose_env(root, state, cfg):
     # Loopback-published connections (the SSH-tunnel path) arrive from the Docker gateway only.
     tunnel_source = str(ipaddress.ip_network(state["public_subnet"])[1]) + "/32"
-    values = {"INSTALL_DIR": str(root), "APP_IMAGE": state["images"]["application"], "POSTGRES_IMAGE": state["images"]["postgres"], "CADDY_IMAGE": state["images"]["caddy"], "VOLUME_PREFIX": state["volume_prefix"], "DATABASE_SUBNET": state["database_subnet"], "PROXY_SUBNET": state["proxy_subnet"], "PUBLIC_SUBNET": state["public_subnet"], "TUNNEL_SOURCE": tunnel_source, "PG_BIND": "0.0.0.0" if cfg["mode"] == "https" else "127.0.0.1"}
+    values = {"INSTALL_DIR": str(root), "APP_IMAGE": state["images"]["application"], "POSTGRES_IMAGE": state["images"]["postgres"], "CADDY_IMAGE": state["images"]["caddy"], "VOLUME_PREFIX": state["volume_prefix"], "DATABASE_SUBNET": state["database_subnet"], "PROXY_SUBNET": state["proxy_subnet"], "PUBLIC_SUBNET": state["public_subnet"], "TUNNEL_SOURCE": tunnel_source, "PG_BIND": "0.0.0.0" if cfg["mode"] == "https" else "127.0.0.1",
+              "SCHEDULE_INTERVAL": os.environ.get("PGFY_SCHEDULE_INTERVAL", "5m")}
+    shared_buffers, effective_cache = postgres_memory(host_memory_mib())
+    values.update(PG_SHARED_BUFFERS=f"{shared_buffers}MB", PG_EFFECTIVE_CACHE_SIZE=f"{effective_cache}MB")
     return "\n".join(f"{k}={v}" for k, v in values.items()) + "\n"
 
+POSTGRES_POLICY = re.compile(r"postgres:18\.[0-9]+-bookworm@sha256:[a-f0-9]{64}\Z")
+VERSION = re.compile(r"v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([a-zA-Z0-9.-]+))?\Z")
+
 def verify_bundle(bundle):
+    release = verify_bundle_integrity(bundle)
+    release_policy(release)
+    return release
+
+def release_policy(release):
+    # Minor PostgreSQL releases may change; the major version and base OS (collation) may not.
+    if not POSTGRES_POLICY.fullmatch(release["images"]["postgres"]):
+        raise InstallError("This release requires PostgreSQL 18 on the bookworm base image.")
+
+def verify_bundle_integrity(bundle):
+    """Checksums, pinned digests and a version: everything an older installer can judge about a newer bundle."""
     manifest = bundle / "SHA256SUMS"
     if not manifest.is_file():
         raise InstallError("Bundle has no SHA256SUMS. Download a versioned release bundle.")
@@ -173,11 +224,30 @@ def verify_bundle(bundle):
     for key in ("application", "postgres", "caddy"):
         if not DIGEST.fullmatch(release["images"][key]):
             raise InstallError(f"The {key} image is not pinned to a digest.")
-    if not release["images"]["postgres"].startswith("postgres:18.6-bookworm@"):
-        raise InstallError("This release requires PostgreSQL 18.6 bookworm.")
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?", release["version"]):
+    if not VERSION.fullmatch(release["version"]):
         raise InstallError("Invalid release version.")
     return release
+
+def parse_version(version):
+    match = VERSION.fullmatch(version)
+    if not match:
+        raise InstallError(f"Invalid release version {version}.")
+    return tuple(int(part) for part in match.groups()[:3]), match.group(4)
+
+def prerelease_key(pre):
+    # Semantic-versioning precedence: numeric identifiers sort numerically and before alphanumeric ones.
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in pre.split(".")]
+
+def update_allowed(installed, candidate):
+    """Stable moves only to a newer stable; a pre-release moves to a later pre-release of the same version or to
+    its stable release or a newer one. Nothing ever moves backwards or to a pre-release from a stable release."""
+    old_core, old_pre = parse_version(installed)
+    new_core, new_pre = parse_version(candidate)
+    if new_pre is not None:
+        return old_pre is not None and new_core == old_core and prerelease_key(new_pre) > prerelease_key(old_pre)
+    if old_pre is not None:
+        return new_core >= old_core
+    return new_core > old_core
 
 def version_at_least(actual, minimum):
     match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", actual)
@@ -204,6 +274,8 @@ def install_docker(release):
     run(["apt-get", "update"], timeout=300)
     packages = release["docker_packages"]
     run(["apt-get", "install", "-y", *[f"{name}={version}" for name, version in packages.items()]], timeout=600)
+    # Pinned versions stay pinned: a routine apt upgrade must not restart every container.
+    run(["apt-mark", "hold", *packages], timeout=60)
     run(["systemctl", "enable", "--now", "docker"], timeout=120)
 
 def network_preflight(hostname):
@@ -248,7 +320,14 @@ def available_ports(mode):
 
 def ipv6_enabled():
     flag = Path("/proc/sys/net/ipv6/conf/all/disable_ipv6")
-    return socket.has_ipv6 and (not flag.exists() or flag.read_text().strip() == "0")
+    if not socket.has_ipv6 or (flag.exists() and flag.read_text().strip() != "0"):
+        return False
+    # A kernel booted with ipv6.disable=1 has no sysctl and refuses the socket family.
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+    except OSError:
+        return False
+    return True
 
 def select_subnets():
     occupied = []
@@ -278,8 +357,7 @@ def preflight(root, release, hostname, mode, existing):
     filesystem = run(["findmnt", "-n", "-o", "FSTYPE", "-T", str(ancestor)]).stdout.strip()
     if filesystem not in ("ext4", "xfs", "btrfs"):
         raise InstallError("Installation requires persistent local ext4, XFS, or Btrfs storage.")
-    mem_kib = int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemTotal:")))
-    if (os.cpu_count() or 0) < 2 or mem_kib < 1900000 or shutil.disk_usage(ancestor).free < 20 * 1024**3:
+    if (os.cpu_count() or 0) < 2 or host_memory_mib() < 1855 or shutil.disk_usage(ancestor).free < 20 * 1024**3:
         raise InstallError("Validation minimum: 2 vCPU, 2 GiB RAM, and 20 GiB free installation disk.")
     network_preflight(hostname)
     if not shutil.which("docker"):
@@ -359,6 +437,64 @@ class Installation:
     def validate_caddy(self):
         self.compose("run", "--rm", "--no-deps", "caddy", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile")
 
+def stage_bundle(bundle, target, verify):
+    """Copy a verified bundle into releases/ through a staging directory, so a partial copy is never used."""
+    staging = target.parent / (target.name + ".staging")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    for path in bundle.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            destination = staging / path.relative_to(bundle)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, destination)
+            os.chmod(destination, 0o644)
+    verify(staging)
+    staging.rename(target)
+
+def write_pgfyctl(root, bundle):
+    atomic(root / "pgfyctl", f'#!/usr/bin/env bash\nexec python3 "{bundle}/installer.py" --dir "{root}" "$@"\n', 0o700)
+
+def pull_images(images):
+    for image in images.values():
+        result = run(["docker", "pull", "--platform", "linux/amd64", image], timeout=600, check=False)
+        if result.returncode:
+            raise InstallError("Pinned image pull failed. Check registry access and retry this same bundle; existing state is preserved.")
+
+def converge_steps(installation):
+    """Release-specific host configuration, shared by install and update. Every step must be idempotent and
+    compatible with the previous release: an update that rolls back restores files and metadata, never these
+    effects on PostgreSQL or the host."""
+    cfg = installation.config()
+    atomic(installation.root / "config/caddy/Caddyfile", caddyfile(cfg), 0o644)
+    atomic(installation.root / "config/pg/pg_hba.conf", pg_hba(installation.state["database_subnet"]), 0o644)
+    installation.validate_caddy()
+
+# Grants added after the first release; init.sh carries them for fresh clusters. Additive and harmless to
+# earlier releases, as every converge step must be.
+POSTGRES_CONVERGE_SQL = """GRANT pg_use_reserved_connections TO pgfy_mgmt, pgfy_health;
+GRANT SET ON PARAMETER temp_file_limit TO pgfy_mgmt;
+"""
+
+def converge_postgres(installation):
+    """Bring an existing cluster's system roles up to this release, as the bootstrap role over the local socket."""
+    installation.wait_postgres()
+    command = 'PGPASSWORD="$(cat /run/secrets/bootstrap_password)" exec psql -U pgfy_bootstrap -d pgfy_system -XAtq -v ON_ERROR_STOP=1'
+    installation.compose("exec", "-T", "postgres", "sh", "-c", command, input=POSTGRES_CONVERGE_SQL, timeout=60)
+
+def write_generated(generated, stage):
+    """Create generated configuration on a first install; on a rerun, refuse any change of identity, but take a new
+    memory measurement (the server may have been resized), which PostgreSQL picks up when it is started."""
+    for path, content in generated.items():
+        if not path.exists():
+            if stage != "preparing":
+                raise InstallError(f"Installation configuration {path.name} is missing; restore it from your host backup.")
+            atomic(path, content, 0o600 if path.name == "compose.env" else 0o644)
+        elif path.name == "installation-id" and path.read_text() != content or path.name == "compose.env" and without_memory(path.read_text()) != without_memory(content):
+            raise InstallError(f"{path.name} no longer matches persisted installation/release/volume identity. Restore the original configuration; no services were changed.")
+        elif path.name == "compose.env" and path.read_text() != content:
+            atomic(path, content, 0o600)
+
 def install(args):
     bundle = Path(args.bundle).resolve()
     release = verify_bundle(bundle)
@@ -369,7 +505,7 @@ def install(args):
     if existing:
         previous = read_json(root / "state.json")
         if release["version"] != previous["release"] or release["images"] != previous["images"]:
-            raise InstallError("Reruns must use the installed release and image digests. Updates require a separate procedure.")
+            raise InstallError("Reruns must use the installed release and image digests. Updates require a separate procedure: pgfyctl update <extracted bundle directory>.")
         cfg = read_json(root / "config/install.json")
         if (args.hostname and args.hostname != cfg["hostname"]) or (args.tunnel and cfg["mode"] != "tunnel"):
             raise InstallError("Use pgfyctl hostname or pgfyctl tunnel to change host access configuration.")
@@ -396,19 +532,9 @@ def install(args):
     installation = Installation(root)
     state = installation.state
     if not installation.bundle.exists():
-        staging = root / "releases" / (state["release"] + ".staging")
-        staging.mkdir(parents=True, exist_ok=True)
-        for path in bundle.rglob("*"):
-            if path.is_file() and not path.is_symlink():
-                target = staging / path.relative_to(bundle)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, target)
-                os.chmod(target, 0o644)
-        verify_bundle(staging)
-        staging.rename(installation.bundle)
-    else:
-        verify_bundle(installation.bundle)
-    atomic(root / "pgfyctl", f'#!/usr/bin/env bash\nexec python3 "{installation.bundle}/installer.py" --dir "{root}" "$@"\n', 0o700)
+        stage_bundle(bundle, installation.bundle, verify_bundle)
+    verify_bundle(installation.bundle)
+    write_pgfyctl(root, installation.bundle)
     print("Release verified. Preparing persistent storage and pinned images…", flush=True)
     (root / "secrets").mkdir(mode=0o711, exist_ok=True)
     (root / "data/sqlite").mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -423,11 +549,7 @@ def install(args):
     (root / "config/pg/managed").mkdir(mode=0o750, exist_ok=True)
     os.chown(root / "config/pg/managed", 10001, 999)
     (root / "config/postgres-tls").mkdir(parents=True, mode=0o755, exist_ok=True)
-    images = state["images"]
-    for image in images.values():
-        result = run(["docker", "pull", "--platform", "linux/amd64", image], timeout=600, check=False)
-        if result.returncode:
-            raise InstallError("Pinned image pull failed. Check registry access and retry this same bundle; existing state is preserved.")
+    pull_images(state["images"])
     data_state = installation.inspect_data()
     if data_state not in ("empty", state["id"]):
         raise InstallError("Partial or foreign PostgreSQL initialization detected. Stop and inspect the existing volume; do not regenerate credentials or rerun initialization scripts blindly.")
@@ -450,21 +572,18 @@ def install(args):
         root / "config/caddy/Caddyfile": caddyfile(cfg),
         root / "compose.env": compose_env(root, state, cfg),
     }
-    for path, content in generated.items():
-        if not path.exists():
-            if state["stage"] != "preparing":
-                raise InstallError(f"Installation configuration {path.name} is missing; restore it from your host backup.")
-            atomic(path, content, 0o600 if path.name == "compose.env" else 0o644)
-        elif path.name in ("compose.env", "installation-id") and path.read_text() != content:
-            raise InstallError(f"{path.name} no longer matches persisted installation/release/volume identity. Restore the original configuration; no services were changed.")
+    write_generated(generated, state["stage"])
     placeholder_certificate(root / "config/postgres-tls")
     installation.compose("config", "--quiet")
-    installation.validate_caddy()
+    converge_steps(installation)
     sqlite_path = root / "data/sqlite/pgfy.db"
     if not sqlite_path.exists():
         if data_state != "empty" or state["stage"] != "preparing" or any((root / "data/sqlite").iterdir()):
             raise InstallError("Existing management storage is missing. Restore SQLite; setup will not be reopened.")
         installation.compose("run", "--rm", "--no-deps", "application", "initialize-store")
+    # The application applies limits that rely on these grants, so PostgreSQL is converged before it starts.
+    installation.compose("up", "-d", "postgres", timeout=180)
+    converge_postgres(installation)
     installation.compose("up", "-d", "postgres", "application", "caddy", timeout=180)
     print("Checking authenticated PostgreSQL, SQLite, and dashboard routing…", flush=True)
     installation.verify()
@@ -474,6 +593,10 @@ def install(args):
     # Refresh read-only version metadata; the session scope remains unchanged.
     installation.compose("restart", "application", timeout=60)
     installation.verify()
+    converge_host(root, mode)
+    print("Enabling unattended security updates…", flush=True)
+    unattended_upgrades()
+    host_status(installation)
     state["stage"] = "installed"
     json_write(root / "state.json", state)
     print(f"Installation verified: {cfg['origin']}")
@@ -482,7 +605,6 @@ def install(args):
         print("PostgreSQL listens on 127.0.0.1:5432 only. Use ssh -L 5432:127.0.0.1:5432 user@server.")
     else:
         sync_db_cert(installation, fatal=False)
-        install_cert_timer(root)
         print(f"Direct database access: {hostname}:5432 over TLS. Open TCP 5432 in your provider firewall to allow application connections.")
     if not existing:
         # Token command emits plaintext only to this terminal, never container logs.
@@ -500,7 +622,8 @@ def change_access(installation, mode, hostname="", rollback=False):
     old = installation.config()
     if rollback:
         saved = read_json(root / "access-rollback.json")
-        new = saved["config"]
+        # Only access fields come back: the record may predate an update, and must not revert the release.
+        new = dict(old, **{key: saved["config"][key] for key in ("mode", "hostname", "origin")})
     else:
         if mode == "https":
             valid_hostname(hostname)
@@ -512,8 +635,6 @@ def change_access(installation, mode, hostname="", rollback=False):
     saved_caddy = (root / "config/caddy/Caddyfile").read_text()
     try:
         installation.write_access(new)
-        if rollback:
-            atomic(root / "config/caddy/Caddyfile", saved["caddyfile"], 0o644)
         installation.validate_caddy()
         # PG_BIND follows the access mode: public 5432 only alongside public HTTPS.
         atomic(root / "compose.env", compose_env(root, installation.state, new), 0o600)
@@ -526,7 +647,9 @@ def change_access(installation, mode, hostname="", rollback=False):
         atomic(root / "config/caddy/Caddyfile", saved_caddy, 0o644)
         atomic(root / "compose.env", compose_env(root, installation.state, old), 0o600)
         installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=120, check=False)
+        refresh_timers(root, old["mode"])
         raise InstallError("Access change failed; previous configuration restored. Sign in again. If the host was interrupted, run pgfyctl rollback-hostname.")
+    refresh_timers(root, new["mode"])
     print(f"Access verified: {new['origin']}. Previous sessions are invalid; sign in again.")
     if new["mode"] == "tunnel":
         print("Loopback access only. Use ssh -L 8080:127.0.0.1:8080 user@server.")
@@ -540,8 +663,28 @@ def certificate_fingerprint(path):
     return out.strip().split("=", 1)[1]
 
 def sync_db_cert(installation, fatal=True):
-    """Deliver Caddy's certificate for the dashboard hostname to PostgreSQL. Caddy issues and
-    renews; this copies, validates, reloads, and confirms a new connection sees the change."""
+    """Deliver Caddy's certificate for the dashboard hostname to PostgreSQL, recording every outcome in
+    config/cert-sync.json for the dashboard. Tunnel mode has no database certificate and records nothing."""
+    if installation.config()["mode"] != "https":
+        return deliver_db_cert(installation, fatal)
+    try:
+        deliver_db_cert(installation, fatal=True)
+    except InstallError as error:
+        record_cert_sync(installation.root, False, str(error))
+        if fatal:
+            raise
+        print(f"Database certificate not synced yet: {error} The self-signed placeholder remains; clients cannot verify it until sync succeeds.")
+        return
+    except BaseException:
+        record_cert_sync(installation.root, False, "Certificate delivery stopped unexpectedly; run pgfyctl sync-db-cert and pgfyctl diagnostics.")
+        raise
+    record_cert_sync(installation.root, True, "")
+
+def record_cert_sync(root, ok, message):
+    json_write(root / "config/cert-sync.json", {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "ok": ok, "message": message}, 0o644)
+
+def deliver_db_cert(installation, fatal=True):
+    """Caddy issues and renews; this copies, validates, reloads, and confirms a new connection sees the change."""
     root = installation.root
     cfg = installation.config()
     tls = root / "config/postgres-tls"
@@ -594,15 +737,430 @@ def sync_db_cert(installation, fatal=True):
             raise
         print(f"Database certificate not synced yet: {error} The self-signed placeholder remains; clients cannot verify it until sync succeeds.")
 
-def install_cert_timer(root):
+class SimpleResult:
+    def __init__(self, returncode, stdout):
+        self.returncode, self.stdout = returncode, stdout
+
+def refresh_timers(root, mode):
+    """converge_host for paths where the access change itself is what must be reported."""
+    try:
+        converge_host(root, mode)
+    except (InstallError, OSError) as error:
+        print(f"Warning: host timers could not be updated ({error}); rerun the installer or pgfyctl hostname later.")
+
+def converge_host(root, mode):
+    """Host timers for this release: status every five minutes in both modes, certificate delivery only with
+    a public hostname. Idempotent; switching to tunnel mode stops the certificate timer."""
     units = {
-        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nExecStart={root}/pgfyctl sync-db-cert\n",
+        "/etc/systemd/system/pgfy-host-status.service": f"[Unit]\nDescription=Record Pgfy host status (disk, clock)\n\n[Service]\nType=oneshot\nTimeoutStartSec=120\nExecStart={root}/pgfyctl host-status\n",
+        "/etc/systemd/system/pgfy-host-status.timer": "[Unit]\nDescription=Pgfy host status every five minutes\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=5min\nAccuracySec=30s\n\n[Install]\nWantedBy=timers.target\n",
+        "/etc/systemd/system/pgfy-cert.service": f"[Unit]\nDescription=Deliver the renewed Pgfy database certificate to PostgreSQL\n\n[Service]\nType=oneshot\nTimeoutStartSec=900\nExecStart={root}/pgfyctl sync-db-cert\n",
         "/etc/systemd/system/pgfy-cert.timer": "[Unit]\nDescription=Daily Pgfy database certificate sync\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
     }
     for path, content in units.items():
         atomic(path, content, 0o644)
     run(["systemctl", "daemon-reload"], check=False)
-    run(["systemctl", "enable", "--now", "pgfy-cert.timer"], check=False)
+    run(["systemctl", "enable", "--now", "pgfy-host-status.timer"], check=False)
+    run(["systemctl", "enable" if mode == "https" else "disable", "--now", "pgfy-cert.timer"], check=False)
+
+def host_status(installation, write=True):
+    """Disk and clock facts the dashboard cannot see from its container. Runs without the installation lock:
+    it only reads files that are replaced atomically and writes its own."""
+    root = installation.root
+    paths = {"postgres": None, "workspace": root / "data/work", "root": Path("/")}
+    def probe(args):
+        # A missing or hung tool is an unknown, never a crash of the five-minute timer.
+        try:
+            return run(args, check=False, timeout=20)
+        except InstallError:
+            return SimpleResult(1, "")
+    mountpoint = probe(["docker", "volume", "inspect", installation.state["volume_prefix"] + "_postgres", "--format", "{{.Mountpoint}}"])
+    if mountpoint.returncode == 0 and mountpoint.stdout.strip():
+        paths["postgres"] = Path(mountpoint.stdout.strip())
+    disks = []
+    for name, path in paths.items():
+        try:
+            if path is None:
+                raise OSError("volume not found")
+            usage = shutil.disk_usage(path)
+            disks.append({"name": name, "device": os.stat(path).st_dev, "total_bytes": usage.total, "free_bytes": usage.free})
+        except OSError:
+            # Never a fabricated zero: an unmeasurable path says so.
+            disks.append({"name": name, "error": "could not be measured"})
+    ntp = probe(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+    synchronized = {"yes": True, "no": False}.get(ntp.stdout.strip()) if ntp.returncode == 0 else None
+    status = {"version": 1, "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "disks": disks, "ntp": {"synchronized": synchronized}}
+    if write:
+        json_write(root / "config/host-status.json", status, 0o644)
+    return status
+
+def unattended_upgrades():
+    """Security updates install themselves unless the operator explicitly turned that off. Never fatal."""
+    environment = dict(os.environ, DEBIAN_FRONTEND="noninteractive", NEEDRESTART_MODE="l")
+    try:
+        # Prints UU='1', or nothing when unset.
+        current = run(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"], check=False).stdout
+        value = (shlex.split(current.strip().partition("=")[2]) or [""])[0] if "=" in current else ""
+        if value == "0":
+            print("Warning: unattended security updates are explicitly disabled on this host; see the host runbook.")
+            return "disabled by operator"
+        if value:
+            return "enabled"
+        installed = run(["dpkg-query", "-W", "-f=${Status}", "unattended-upgrades"], check=False)
+        if "install ok installed" not in installed.stdout:
+            for command in (["update"], ["install", "-y", "unattended-upgrades"]):
+                subprocess.run(["apt-get", "-o", "DPkg::Lock::Timeout=120", *command], env=environment, capture_output=True, text=True, timeout=600, check=True)
+        if not Path("/etc/apt/apt.conf.d/20auto-upgrades").exists():
+            atomic("/etc/apt/apt.conf.d/20auto-upgrades", 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n', 0o644)
+        return "enabled"
+    except (InstallError, OSError, ValueError, subprocess.SubprocessError):
+        print("Warning: unattended security updates could not be enabled; enable them by hand (see the host runbook).")
+        return "unknown"
+
+UPDATE_FILES = ("state.json", "compose.env", "config/install.json", "config/caddy/Caddyfile", "config/pg/pg_hba.conf", "pgfyctl")
+SNAPSHOT_DB = ".update-rollback.db"  # inside data/sqlite, owned by the application user
+CONVERGE_CONTRACT = "1"
+
+class Interrupted(KeyboardInterrupt):
+    pass
+
+_shield = {"on": False}
+
+def _interrupt(signum, frame):
+    # Once a rollback has begun, a second signal must not abort it half-way.
+    if not _shield["on"]:
+        raise Interrupted(f"signal {signum}")
+
+@contextlib.contextmanager
+def signals(handler):
+    """SIGTERM and SIGHUP (a dropped SSH session) interrupt like Ctrl-C; SIG_IGN shields a rollback."""
+    names = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {name: signal.getsignal(name) for name in names}
+    for name in names:
+        if handler is not None or name != signal.SIGINT:
+            signal.signal(name, handler if handler is not None else _interrupt)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            signal.signal(name, value)
+
+def fsync_dir(path):
+    directory = os.open(path, os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+def app_status(installation):
+    identifier = installation.container("application")
+    if not identifier:
+        return "absent"
+    return run(["docker", "inspect", "--format", "{{.State.Status}}", identifier]).stdout.strip()
+
+def stop_application(installation, failure="The application did not stop; nothing was changed."):
+    installation.compose("stop", "application", timeout=120)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if app_status(installation) not in ("running", "restarting"):
+            return
+        time.sleep(1)
+    raise InstallError(failure)
+
+def app_command(installation, *args, running=True, check=True):
+    """Run a pgfy host command in the running application, or in a one-off container of the configured release."""
+    if running:
+        return installation.compose("exec", "-T", "application", "pgfy", *args, timeout=60, check=check)
+    return installation.compose("run", "--rm", "--no-deps", "application", *args, timeout=120, check=check)
+
+def store_file(root, image, *args):
+    """Snapshot or restore SQLite with a specific application image, independent of compose configuration."""
+    return run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", "10001:10001", "-v", f"{root}/data/sqlite:/data", image, *args], timeout=600)
+
+def run_converge(installation, bundle, lock_fd):
+    """The new release applies its own host configuration while this process keeps the lock. Its messages go
+    straight to the operator's terminal; it prints no secrets."""
+    run([sys.executable, bundle / "installer.py", "--dir", installation.root, "converge", "--contract", CONVERGE_CONTRACT, "--lock-fd", lock_fd], timeout=600, capture=False, pass_fds=(lock_fd,))
+
+def discard_snapshot(root, image):
+    """The snapshot lives in the application user's private directory; remove it as that user."""
+    run(["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "10001:10001", "-v", f"{root}/data/sqlite:/data", "--entrypoint", "rm", image, "-f", "/data/" + SNAPSHOT_DB], timeout=120)
+
+def converge(root, contract, lock_fd):
+    if contract != CONVERGE_CONTRACT:
+        raise InstallError(f"Unsupported converge contract {contract}.")
+    if lock_fd is None or not holds_lock(root, lock_fd):
+        raise InstallError("converge runs only from pgfyctl update, which holds the installation lock.")
+    converge_installation(Installation(root))
+
+def converge_installation(installation):
+    """Everything this release changes on an installed host during an update."""
+    # The previous release's installer wrote compose.env; this release's own keys (PostgreSQL memory) are added
+    # here, before PostgreSQL is recreated. compose.env was snapshotted earlier, so a rollback restores it.
+    atomic(installation.root / "compose.env", compose_env(installation.root, installation.state, installation.config()), 0o600)
+    converge_steps(installation)
+    converge_host(installation.root, installation.config()["mode"])
+    # PostgreSQL keeps running through an update; the later force-recreate applies new server flags.
+    installation.compose("up", "-d", "--no-recreate", "postgres", timeout=180)
+    converge_postgres(installation)
+
+def update(root, bundle, drain=False, lock_fd=None):
+    installation = Installation(root)
+    state = installation.state
+    rollback_dir = root / "update-rollback"
+    if state.get("stage") != "installed":
+        raise InstallError("Finish the installation before updating it.")
+    if rollback_dir.exists():
+        raise InstallError("An earlier update did not finish. Run pgfyctl rollback-update first.")
+    bundle = Path(bundle).resolve()
+    if not bundle.is_dir():
+        raise InstallError("Extract the release bundle and pass its directory.")
+    release = verify_bundle_integrity(bundle)
+    release_policy(release)
+    if not update_allowed(state["release"], release["version"]):
+        raise InstallError(f"Cannot update {state['release']} to {release['version']}: updates move only to a newer release, stable releases only to stable ones.")
+    target = root / "releases" / release["version"]
+    if target.exists():
+        if (target / "SHA256SUMS").read_bytes() != (bundle / "SHA256SUMS").read_bytes():
+            raise InstallError(f"releases/{release['version']} exists with different contents; inspect it manually.")
+        verify_bundle_integrity(target)
+    else:
+        stage_bundle(bundle, target, verify_bundle_integrity)
+    print(f"Release {release['version']} verified. Pulling pinned images…", flush=True)
+    pull_images(release["images"])
+    cfg = installation.config()
+    new_state = dict(state, release=release["version"], images=release["images"])
+    with tempfile.NamedTemporaryFile("w", dir=root, prefix=".pgfy-env-") as candidate:
+        candidate.write(compose_env(root, new_state, cfg))
+        candidate.flush()
+        run(["docker", "compose", "--project-name", state["volume_prefix"], "--env-file", candidate.name, "-f", target / "compose.yaml", "-f", target / f"compose.{cfg['mode']}.yaml", "config", "--quiet"])
+    status = app_status(installation)
+    was_running = status == "running"
+    snapshot_ready = committed = False
+    step = "pausing the installation"
+    with signals(None):
+        try:
+            if was_running:
+                app_command(installation, "maintenance", "on")
+                running = int(app_command(installation, "jobs", "running").stdout.strip() or "0")
+                if running and not drain:
+                    raise InstallError("A backup or restore is running. Retry when it finishes, or pass --drain to wait for it.")
+                deadline = time.monotonic() + 2 * 3600
+                while running:
+                    if time.monotonic() > deadline:
+                        raise InstallError("A backup or restore is still running after two hours; nothing was changed.")
+                    print("Waiting for the running backup or restore to finish…", flush=True)
+                    time.sleep(5)
+                    running = int(app_command(installation, "jobs", "running").stdout.strip() or "0")
+                stop_application(installation)
+            else:
+                # A crash-looping application is stopped before anything reads its storage.
+                stop_application(installation)
+                app_command(installation, "maintenance", "on", running=False)
+            print("Application stopped. Taking a snapshot of management storage…", flush=True)
+            step = "taking the snapshot"
+            rollback_dir.mkdir(mode=0o700)
+            saved = {}
+            for name in UPDATE_FILES:
+                source = root / name
+                info = source.stat()
+                destination = rollback_dir / "files" / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                saved[name] = [stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid]
+            store_file(root, state["images"]["application"], "store-snapshot", "/data/" + SNAPSHOT_DB)
+            meta = {"format": 1, "from": state["release"], "to": release["version"], "from_images": state["images"], "files": saved, "app_was_running": was_running, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            json_write(rollback_dir / "meta.json", meta)
+            fsync_dir(rollback_dir)
+            snapshot_ready = True
+            # Apply. Sessions are signed out: the new generation changes every session scope.
+            step = "switching to the new release"
+            caddy_version = run(["docker", "run", "--rm", "--network", "none", release["images"]["caddy"], "caddy", "version"], timeout=120).stdout.strip()
+            json_write(root / "state.json", new_state)
+            atomic(root / "compose.env", compose_env(root, new_state, cfg), 0o600)
+            json_write(root / "config/install.json", dict(cfg, release=release["version"], generation=uuid.uuid4().hex, caddy_version=caddy_version), 0o644)
+            write_pgfyctl(root, target)
+            installation = Installation(root)
+            step = "applying the new release's host configuration"
+            run_converge(installation, target, lock_fd)
+            print("Starting the new release…", flush=True)
+            step = "starting the new release"
+            installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=180)
+            step = "verifying readiness"
+            installation.verify()
+            # Commit point: from here on the new release stays, whatever happens during cleanup.
+            (rollback_dir / "meta.json").unlink()
+            committed = True
+            fsync_dir(rollback_dir)
+        except BaseException as error:
+            _shield["on"] = True
+            try:
+                with signals(signal.SIG_IGN):
+                    if not committed:
+                        reason = f"{step}: {error or type(error).__name__}"
+                        if snapshot_ready:
+                            raise InstallError(rollback_update(root, reason=reason)) from error
+                        shutil.rmtree(rollback_dir, ignore_errors=True)
+                        try:
+                            discard_snapshot(root, state["images"]["application"])
+                        except InstallError:
+                            pass
+                        unquiesce(installation, was_running)
+                        if isinstance(error, InstallError):
+                            raise
+                        raise InstallError(f"Update stopped while {reason}; nothing was changed and the application was restarted.") from error
+            finally:
+                _shield["on"] = False
+    finish = [("turn maintenance off", lambda: app_command(installation, "maintenance", "off")),
+              ("remove the storage snapshot", lambda: discard_snapshot(root, release["images"]["application"])),
+              ("remove the hostname rollback record", lambda: (root / "access-rollback.json").unlink(missing_ok=True)),
+              ("remove update-rollback/", lambda: shutil.rmtree(rollback_dir))]
+    for step, action in finish:
+        try:
+            action()
+        except (InstallError, OSError) as error:
+            print(f"Warning: updated, but could not {step}: {error}. Run pgfyctl maintenance off and remove leftovers by hand.")
+    print(f"Updated to {release['version']} and verified: {cfg['origin']}. Sign in again.")
+
+def reexec_rollback(root):
+    """A rollback is performed by the release being restored, whichever pgfyctl the operator ran."""
+    meta_path = root / "update-rollback/meta.json"
+    if not meta_path.exists():
+        return
+    previous = read_json(meta_path).get("from", "")
+    installer = root / "releases" / previous / "installer.py"
+    if VERSION.fullmatch(previous) and installer.is_file() and Path(__file__).resolve() != installer.resolve():
+        os.execv(sys.executable, [sys.executable, str(installer), "--dir", str(root), "rollback-update"])
+
+def unquiesce(installation, was_running):
+    """Undo quiescing when nothing was changed yet: start the application and resume jobs."""
+    installation.compose("up", "-d", "application", timeout=180, check=False)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and app_status(installation) != "running":
+        time.sleep(2)
+    if app_command(installation, "maintenance", "off", check=False).returncode:
+        print("Warning: backups are still paused. Run pgfyctl maintenance off once the application is running.")
+    if not was_running:
+        print("Note: the application was not running before the update; it has been started.")
+
+def rollback_update(root, reason=None):
+    """Restore the release, configuration and management storage captured before an update."""
+    rollback_dir = root / "update-rollback"
+    meta_path = rollback_dir / "meta.json"
+    if not meta_path.exists():
+        # The update stopped before its snapshot was complete: nothing else changed.
+        installation = Installation(root)
+        unquiesce(installation, True)
+        shutil.rmtree(rollback_dir, ignore_errors=True)
+        return "No update was applied; the application was restarted."
+    meta = read_json(meta_path)
+    if meta.get("format") != 1:
+        raise InstallError("update-rollback/ was written by an unknown installer version; restore it by hand.")
+    old_image = meta["from_images"]["application"]
+    try:
+        store_file(root, old_image, "store-restore", "--check", "/data/" + SNAPSHOT_DB)
+    except InstallError as error:
+        raise InstallError(f"The storage snapshot is missing or damaged, so nothing was rolled back. Keep update-rollback/ and data/sqlite/{SNAPSHOT_DB}; run pgfyctl diagnostics.") from error
+    installation = Installation(root)
+    installation.compose("stop", "application", timeout=120, check=False)
+    for name, (mode, uid, gid) in meta["files"].items():
+        atomic(root / name, (rollback_dir / "files" / name).read_bytes(), mode, uid, gid)
+    installation = Installation(root)
+    stop_application(installation, f"The application did not stop during the rollback. update-rollback/ is kept; run pgfyctl rollback-update to retry.")
+    cfg = installation.config()
+    json_write(root / "config/install.json", dict(cfg, generation=uuid.uuid4().hex), 0o644)
+    store_file(root, old_image, "store-restore", "/data/" + SNAPSHOT_DB)
+    installation.compose("up", "-d", "--force-recreate", "postgres", "application", "caddy", timeout=180)
+    try:
+        installation.verify()
+    except InstallError as error:
+        raise InstallError(f"Rollback to {meta['from']} did not reach readiness. update-rollback/ is kept; run pgfyctl diagnostics, then pgfyctl rollback-update to retry.") from error
+    if app_command(installation, "maintenance", "off", check=False).returncode:
+        print("Warning: backups are still paused. Run pgfyctl maintenance off.")
+    discard_snapshot(root, old_image)
+    shutil.rmtree(rollback_dir)
+    if reason:
+        return f"Update to {meta['to']} failed while {reason}. Restored {meta['from']}; it is ready. Sign in again."
+    return f"Rolled back the interrupted update to {meta['to']}. Restored {meta['from']}; it is ready. Sign in again."
+
+KIT_SNAPSHOT = ".recovery-kit.db"  # inside data/sqlite, taken by the application image and removed afterwards
+KIT_FILES = ("secrets/encryption_key", "secrets/bootstrap_password", "secrets/health_password", "secrets/management_password", "config/install.json", "state.json")
+
+def kit_readme(installation, created):
+    cfg = installation.config()
+    return f"""Pgfy recovery kit
+Installation {cfg.get("id", "")}, release {installation.state.get("release", "")}, {cfg.get("mode", "")} {cfg.get("hostname", "")}
+Created {created}
+
+This kit is as sensitive as your bucket keys: the encryption key opens the sealed bucket
+credentials, project passwords and second-factor secret stored in metadata.db.
+
+A lost server is recovered from the bucket alone (docs/recovery-runbook.md); that path is
+tested and needs neither this kit nor SQLite. This kit is for a server whose PostgreSQL
+volume is intact but whose management storage or key was lost or damaged; see
+"Recovery kit and daily metadata copies" in the recovery runbook before using it.
+
+Files (the archive stores them all as root, 0600; put them back with these owners/modes):
+  metadata.db                   -> data/sqlite/pgfy.db          10001:10001 0600
+  secrets/encryption_key        -> secrets/encryption_key       10001:10001 0400
+  secrets/bootstrap_password    -> secrets/bootstrap_password   999:999     0400
+  secrets/health_password       -> secrets/health_password      10001:999   0440
+  secrets/management_password   -> secrets/management_password  10001:999   0440
+  config/install.json, state.json: a record of this installation only. Never copy them
+  over a newer installation; they pin the release, images and generation.
+"""
+
+def export_recovery_kit(installation, out=None):
+    """Write secrets, identity and a fresh copy of management storage as a tar.gz to stdout. Everything is read
+    before anything is written, so a failure never leaves a truncated kit that looks complete."""
+    out = out or sys.stdout
+    root = installation.root
+    if out.isatty():
+        raise InstallError("The kit contains secrets. Redirect it to a file or pipe, e.g. (umask 077; sudo pgfyctl export-recovery-kit > pgfy-kit.tar.gz).")
+    if (root / "update-rollback").exists():
+        raise InstallError("An earlier update did not finish. Finish or roll it back (pgfyctl rollback-update) first.")
+    snapshot = root / "data/sqlite" / KIT_SNAPSHOT
+    try:
+        store_file(root, installation.state["images"]["application"], "store-snapshot", "/data/" + KIT_SNAPSHOT)
+        members = {"metadata.db": snapshot.read_bytes()}
+    finally:
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            Path(str(snapshot) + suffix).unlink(missing_ok=True)
+    for name in KIT_FILES:
+        members[name] = (root / name).read_bytes()
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    members = {"README.txt": kit_readme(installation, created).encode(), **members}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo("pgfy-recovery-kit/" + name)
+            info.size, info.mode, info.mtime = len(data), 0o600, int(time.time())
+            info.uid = info.gid = 0
+            info.uname = info.gname = "root"
+            archive.addfile(info, io.BytesIO(data))
+    target = out.buffer
+    try:
+        descriptor = target.fileno()
+    except (io.UnsupportedOperation, AttributeError, ValueError):
+        descriptor = None
+    regular = descriptor is not None and stat.S_ISREG(os.fstat(descriptor).st_mode)
+    # Best effort: a shell redirect on this server creates the file with the operator's umask.
+    if regular:
+        os.fchmod(descriptor, 0o600)
+    try:
+        target.write(buffer.getvalue())
+        target.flush()
+    except OSError as error:
+        if regular:
+            # Never leave a truncated kit that looks like a kit.
+            os.ftruncate(descriptor, 0)
+        if isinstance(error, BrokenPipeError):
+            # Nothing more can reach the closed pipe, including Python's own flush at exit.
+            if descriptor is not None:
+                os.dup2(os.open(os.devnull, os.O_WRONLY), descriptor)
+            raise InstallError("The kit could not be written: the output was closed.") from error
+        raise InstallError(f"The kit could not be written ({error.strerror}); the output was emptied.") from error
+    print(f"Recovery kit written: {len(members)} files. It contains secrets: keep it in your password manager and delete local copies.", file=sys.stderr)
 
 def diagnostics(installation):
     cfg = installation.config()
@@ -620,6 +1178,33 @@ def diagnostics(installation):
         print(service + ": " + result.stdout.strip())
     result = installation.compose("exec", "-T", "application", "pgfy", "health", "ready", check=False)
     print("Authenticated dependency readiness:", "ready" if result.returncode == 0 else "not ready")
+    result = installation.compose("exec", "-T", "application", "pgfy", "maintenance", "status", check=False)
+    maintenance = result.stdout.strip() if result.returncode == 0 else "unknown"
+    print("Maintenance (backups and changes paused):", maintenance + (" — run pgfyctl maintenance off if no update is running" if maintenance == "on" else ""))
+    if (installation.root / "update-rollback").exists():
+        print("An unfinished update left update-rollback/. Run pgfyctl rollback-update.")
+    def probe(args):
+        try:
+            return run(args, check=False, timeout=20).stdout.strip()
+        except InstallError:
+            return ""
+    try:
+        # Diagnostics measure without writing: a dead timer must stay visible as a stale report.
+        previous = installation.root / "config/host-status.json"
+        written = read_json(previous).get("written_at", "never") if previous.exists() else "never"
+        print(f"Host status last written by the timer: {written}; pgfy-host-status.timer {probe(['systemctl', 'is-active', 'pgfy-host-status.timer']) or 'unknown'}")
+        status = host_status(installation, write=False)
+        for disk in status["disks"]:
+            if "error" in disk:
+                print(f"Disk {disk['name']}: could not be measured")
+            else:
+                print(f"Disk {disk['name']}: {100 * disk['free_bytes'] // max(disk['total_bytes'], 1)}% free")
+        print("Clock synchronised:", {True: "yes", False: "NO — TOTP codes and certificates depend on it", None: "unknown"}[status["ntp"]["synchronized"]])
+    except (InstallError, OSError) as error:
+        print("Host status unavailable:", error)
+    upgrades = probe(["apt-config", "shell", "UU", "APT::Periodic::Unattended-Upgrade"]) or "unset"
+    timer = probe(["systemctl", "is-enabled", "apt-daily-upgrade.timer"]) or "unknown"
+    print(f"Unattended upgrades: {upgrades}; apt-daily-upgrade.timer {timer}")
     print("No secrets or raw logs are included. Bootstrap credentials stay in restricted host files.")
 
 def main():
@@ -634,18 +1219,46 @@ def main():
     modes.add_argument("--tunnel", action="store_true")
     sub.add_parser("diagnostics")
     sub.add_parser("setup-token")
+    sub.add_parser("reset-admin", help="issue a one-use token to reset the administrator's password and second factor")
     hostname_parser = sub.add_parser("hostname")
     hostname_parser.add_argument("hostname")
     sub.add_parser("tunnel")
     sub.add_parser("rollback-hostname")
     sub.add_parser("sync-db-cert")
+    sub.add_parser("export-recovery-kit", help="write secrets, identity and a copy of management storage as a tar.gz to stdout")
+    sub.add_parser("host-status", help="record disk and clock status for the dashboard (run by a timer)")
+    update_parser = sub.add_parser("update", help="update to an extracted, newer release bundle")
+    update_parser.add_argument("bundle")
+    update_parser.add_argument("--drain", action="store_true", help="wait for a running backup or restore instead of refusing")
+    sub.add_parser("rollback-update", help="finish rolling back an interrupted update")
+    maintenance_parser = sub.add_parser("maintenance", help="show or clear the pause an update puts on backups and changes")
+    maintenance_parser.add_argument("action", choices=("status", "off"))
+    converge_parser = sub.add_parser("converge", help=argparse.SUPPRESS)
+    converge_parser.add_argument("--contract", required=True)
+    converge_parser.add_argument("--lock-fd", type=int)
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.exit(1, "Host administration requires root; run this command with sudo.\n")
+    root = Path(args.dir).resolve()
     try:
-        with locked(Path(args.dir).resolve()):
+        if args.command == "host-status":
+            # Runs every five minutes, also while an update holds the lock.
+            host_status(Installation(root))
+            return
+        if args.command == "converge":
+            # Runs under the lock held by the updating installer; taking it again would deadlock.
+            converge(root, args.contract, args.lock_fd)
+            return
+        if args.command == "rollback-update":
+            reexec_rollback(root)
+        with locked(root) as lock_fd:
             if args.command == "install":
                 install(args)
+            elif args.command == "update":
+                update(root, args.bundle, args.drain, lock_fd)
+            elif args.command == "rollback-update":
+                with signals(signal.SIG_IGN):
+                    print(rollback_update(root))
             else:
                 installation = Installation(Path(args.dir).resolve())
                 if args.command == "diagnostics":
@@ -655,12 +1268,25 @@ def main():
                     if result.returncode:
                         raise InstallError("Token replacement rejected: setup may already be complete, the existing token may still be valid, or SQLite may be unavailable. Replacement is allowed only before setup and after token expiry.")
                     print("Setup token (expires in 30 minutes):\n" + result.stdout.strip())
+                elif args.command == "reset-admin":
+                    result = installation.compose("exec", "-T", "application", "pgfy", "reset-admin", check=False)
+                    if result.returncode:
+                        raise InstallError("Reset token not issued: setup may be unfinished (use pgfyctl setup-token) or management storage is unavailable.")
+                    print("Reset token (one use, expires in 30 minutes; enter it on the dashboard's \"Reset access\" page, never in a URL):\n" + result.stdout.strip())
+                    print("Completing the reset replaces the password and the second factor and signs out every session.")
+                    print("If the dashboard certificate is broken, run pgfyctl tunnel first and finish the reset over an SSH port-forward.")
                 elif args.command == "hostname":
                     change_access(installation, "https", args.hostname)
                 elif args.command == "tunnel":
                     change_access(installation, "tunnel")
                 elif args.command == "sync-db-cert":
                     sync_db_cert(installation)
+                elif args.command == "export-recovery-kit":
+                    export_recovery_kit(installation)
+                elif args.command == "maintenance":
+                    running = app_status(installation) == "running"
+                    result = app_command(installation, "maintenance", args.action, running=running)
+                    print(result.stdout.strip() or "Backups and changes resumed.")
                 else:
                     change_access(installation, "", rollback=True)
     except (InstallError, OSError, ValueError, KeyError) as error:

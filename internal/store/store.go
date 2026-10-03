@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,43 @@ import (
 
 //go:embed migrations/*.sql
 var migrations embed.FS
+
+// migrationSources lists every embedded migration directory; a test build can
+// append one to exercise updates that migrate and then roll back.
+var migrationSources = []fs.FS{mustSub(migrations, "migrations")}
+
+func mustSub(f fs.FS, dir string) fs.FS {
+	sub, e := fs.Sub(f, dir)
+	if e != nil {
+		panic(e)
+	}
+	return sub
+}
+
+type migrationFile struct {
+	name string
+	body []byte
+}
+
+func migrationFiles() ([]migrationFile, error) {
+	var files []migrationFile
+	for _, source := range migrationSources {
+		entries, e := fs.ReadDir(source, ".")
+		if e != nil {
+			return nil, e
+		}
+		for _, entry := range entries {
+			body, e := fs.ReadFile(source, entry.Name())
+			if e != nil {
+				return nil, e
+			}
+			files = append(files, migrationFile{entry.Name(), body})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+	return files, nil
+}
+
 var ErrSetup = errors.New("setup unavailable or token invalid")
 var ErrTokenActive = errors.New("setup token has not expired; wait for expiry before replacing it")
 
@@ -60,14 +98,13 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, e = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, checksum TEXT NOT NULL)"); e != nil {
 		return e
 	}
-	files, e := migrations.ReadDir("migrations")
+	files, e := migrationFiles()
 	if e != nil {
 		return e
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
 	known := map[string]bool{}
 	for _, file := range files {
-		known[file.Name()] = true
+		known[file.name] = true
 	}
 	rows, e := tx.QueryContext(ctx, "SELECT name FROM schema_migrations")
 	if e != nil {
@@ -97,13 +134,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		return errors.New("database schema is newer than application")
 	}
 	for _, f := range files {
-		b, e := migrations.ReadFile("migrations/" + f.Name())
-		if e != nil {
-			return e
-		}
+		b := f.body
 		checksum := security.Hash(string(b))
 		var existing string
-		e = tx.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE name=?", f.Name()).Scan(&existing)
+		e = tx.QueryRowContext(ctx, "SELECT checksum FROM schema_migrations WHERE name=?", f.name).Scan(&existing)
 		if e == nil {
 			if existing != checksum {
 				return errors.New("migration checksum mismatch")
@@ -114,9 +148,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			return e
 		}
 		if _, e = tx.ExecContext(ctx, string(b)); e != nil {
-			return fmt.Errorf("migration %s failed: %w", f.Name(), e)
+			return fmt.Errorf("migration %s failed: %w", f.name, e)
 		}
-		if _, e = tx.ExecContext(ctx, "INSERT INTO schema_migrations(name,checksum) VALUES (?,?)", f.Name(), checksum); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO schema_migrations(name,checksum) VALUES (?,?)", f.name, checksum); e != nil {
 			return e
 		}
 	}
@@ -146,66 +180,6 @@ func (s *Store) SetupAvailable(ctx context.Context) (bool, error) {
 	var n int
 	e := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM administrator").Scan(&n)
 	return n == 0, e
-}
-func (s *Store) NewSetupToken(ctx context.Context, now time.Time) (string, error) {
-	token := security.Token()
-	tx, e := s.DB.BeginTx(ctx, nil)
-	if e != nil {
-		return "", e
-	}
-	defer tx.Rollback()
-	// Take the write lock before inspecting administrator/token state.
-	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO metadata(key,value) VALUES ('setup_lock','1')"); e != nil {
-		return "", e
-	}
-	var n int
-	if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM administrator").Scan(&n); e != nil {
-		return "", e
-	}
-	if n != 0 {
-		return "", ErrSetup
-	}
-	var expires int64
-	e = tx.QueryRowContext(ctx, "SELECT expires_at FROM setup_token WHERE id=1").Scan(&expires)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		return "", e
-	}
-	if e == nil && expires > now.Unix() {
-		return "", ErrTokenActive
-	}
-	_, e = tx.ExecContext(ctx, "INSERT INTO setup_token(id,token_hash,expires_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at", security.Hash(token), now.Add(30*time.Minute).Unix())
-	if e != nil {
-		return "", e
-	}
-	if e = tx.Commit(); e != nil {
-		return "", e
-	}
-	return token, nil
-}
-func (s *Store) Setup(ctx context.Context, token, email, passwordHash, sessionHash, scope string, now time.Time) error {
-	tx, e := s.DB.BeginTx(ctx, nil)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
-	res, e := tx.ExecContext(ctx, "DELETE FROM setup_token WHERE id=1 AND token_hash=? AND expires_at>? AND NOT EXISTS(SELECT 1 FROM administrator)", security.Hash(token), now.Unix())
-	if e != nil {
-		return e
-	}
-	n, e := res.RowsAffected()
-	if e != nil {
-		return e
-	}
-	if n != 1 {
-		return ErrSetup
-	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO administrator(id,email,password_hash,created_at) VALUES (1,?,?,?)", email, passwordHash, now.Unix()); e != nil {
-		return e
-	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO sessions(token_hash,admin_id,scope,expires_at) VALUES (?,1,?,?)", sessionHash, scope, now.Add(12*time.Hour).Unix()); e != nil {
-		return e
-	}
-	return tx.Commit()
 }
 func (s *Store) Password(ctx context.Context, email string) (string, error) {
 	var hash string

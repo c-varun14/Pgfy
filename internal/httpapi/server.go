@@ -15,11 +15,14 @@ import (
 	"net/mail"
 	"net/netip"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/c-varun14/Pgfy/internal/alerts"
 	"github.com/c-varun14/Pgfy/internal/config"
+	"github.com/c-varun14/Pgfy/internal/hoststatus"
 	"github.com/c-varun14/Pgfy/internal/jobs"
 	"github.com/c-varun14/Pgfy/internal/postgres"
 	"github.com/c-varun14/Pgfy/internal/provision"
@@ -40,8 +43,11 @@ type Server struct {
 	Provisioner  *provision.Provisioner
 	Jobs         *jobs.Worker
 	TLSStatePath string
+	HostPaths    hoststatus.Paths
+	Alerts       *alerts.Engine
 	Now          func() time.Time
 	limiter      rateLimit
+	codeLimiter  rateLimit
 	hashSlots    chan struct{}
 }
 type bucket struct {
@@ -83,12 +89,7 @@ func (l *rateLimit) allow(key string, now time.Time) bool {
 func (s *Server) scope() string {
 	return s.Config.ID + ":" + s.Config.Mode + ":" + s.Config.Generation + ":" + s.Config.Origin
 }
-func (s *Server) cookieName() string {
-	if s.Config.Mode == "https" {
-		return "__Host-pgfy_session"
-	}
-	return "pgfy_tunnel_session"
-}
+func (s *Server) cookieName() string { return s.cookie("session") }
 func (s *Server) Handler() http.Handler {
 	if s.Now == nil {
 		s.Now = time.Now
@@ -101,21 +102,36 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
+	mux.HandleFunc("POST /api/v1/auth/code", s.confirmCode)
+	mux.HandleFunc("GET /api/v1/auth/enrol", s.currentEnrolment)
+	mux.HandleFunc("POST /api/v1/auth/enrol/confirm", s.confirmEnrolment)
+	mux.HandleFunc("POST /api/v1/auth/reset", s.startReset)
+	mux.HandleFunc("POST /api/v1/auth/abandon", s.abandon)
 	mux.HandleFunc("GET /api/v1/auth/session", s.session)
 	mux.HandleFunc("GET /api/v1/system/status", s.status)
 	mux.HandleFunc("GET /api/v1/settings", s.settings)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}", s.getProject)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}", s.deleteProject)
 	mux.HandleFunc("POST /api/v1/projects/{id}/retry", s.retryProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}/credentials", s.getCredentials)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/access", s.updateAccess)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/writes", s.updateWrites)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/limits", s.putLimits)
+	mux.HandleFunc("POST /api/v1/projects/{id}/credentials/rotate", s.rotateCredentials)
+	mux.HandleFunc("GET /api/v1/system/connections", s.connectionBudget)
+	mux.HandleFunc("GET /api/v1/settings/alerts", s.getAlertSettings)
+	mux.HandleFunc("PUT /api/v1/settings/alerts", s.putAlertSettings)
+	mux.HandleFunc("POST /api/v1/settings/alerts/test", s.testAlerts)
+	mux.HandleFunc("GET /api/v1/alerts", s.listAlerts)
 	mux.HandleFunc("POST /api/v1/projects/{id}/connection-checks", s.createConnectionCheck)
 	mux.HandleFunc("GET /api/v1/projects/{id}/connection-checks/{check}", s.getConnectionCheck)
 	mux.HandleFunc("GET /api/v1/settings/storage", s.getStorage)
 	mux.HandleFunc("PUT /api/v1/settings/storage", s.putStorage)
 	mux.HandleFunc("POST /api/v1/settings/storage/check", s.checkStorage)
+	mux.HandleFunc("GET /api/v1/settings/backups", s.getBackupPolicy)
+	mux.HandleFunc("PUT /api/v1/settings/backups", s.putBackupPolicy)
 	mux.HandleFunc("POST /api/v1/projects/{id}/backups", s.startBackup)
 	mux.HandleFunc("GET /api/v1/projects/{id}/backups", s.listBackups)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
@@ -161,10 +177,23 @@ func (s *Server) Handler() http.Handler {
 				failure(w, 503, "metadata_unavailable", "Management storage is unavailable. Run host diagnostics.")
 				return
 			}
+			if r.Method != "GET" && r.Method != "HEAD" && !maintenanceExempt[path.Clean(r.URL.Path)] {
+				// Nothing a rollback would have to undo may be written during an update.
+				if on, e := s.Store.Maintenance(r.Context()); e != nil || on {
+					failure(w, 503, "maintenance", "An update is in progress. Try again when it finishes.")
+					return
+				}
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
+
+// Signing in and out stays possible while an update holds the installation quiet.
+// Resets are not exempt: a rollback would bring the old credentials back. A
+// reset-kind enrolment confirmation is refused inside its own transaction.
+var maintenanceExempt = map[string]bool{"/api/v1/setup": true, "/api/v1/auth/login": true, "/api/v1/auth/logout": true,
+	"/api/v1/auth/code": true, "/api/v1/auth/enrol/confirm": true, "/api/v1/auth/abandon": true}
 
 type baseContextKey struct{}
 
@@ -284,6 +313,13 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		failure(w, 400, "invalid_password", e.Error())
 		return
 	}
+	if s.Config.Mode == "https" {
+		// A public dashboard never has an administrator without a second factor.
+		s.startEnrolment(w, r, store.Enrolment{Kind: "setup", Email: email, PasswordHash: hash}, func(enrolHash, sealed string) error {
+			return s.Store.BeginEnrolment(r.Context(), in.Token, enrolHash, sealed, s.Now())
+		})
+		return
+	}
 	token := security.Token()
 	e = s.Store.Setup(r.Context(), in.Token, email, hash, security.Hash(token), s.scope(), s.Now())
 	if errors.Is(e, store.ErrSetup) {
@@ -319,6 +355,34 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	valid := security.VerifyPassword(hash, in.Password)
 	if e != nil || !valid {
 		failure(w, 401, "invalid_credentials", "Email or password is incorrect.")
+		return
+	}
+	enrolled, current, e := s.Store.Factor(r.Context())
+	if e != nil {
+		failure(w, 503, "metadata_unavailable", "Management storage is unavailable.")
+		return
+	}
+	if current != hash {
+		// The password changed (a reset completed) while this one was being checked.
+		failure(w, 401, "invalid_credentials", "Email or password is incorrect.")
+		return
+	}
+	if enrolled {
+		// The password step alone is not a session: a code must follow.
+		pending := security.Token()
+		if e = s.Store.BeginPending(r.Context(), security.Hash(pending), current, s.scope(), s.Now()); e != nil {
+			failure(w, 503, "metadata_unavailable", "Sign-in could not be saved.")
+			return
+		}
+		s.setStepCookie(w, "pending", pending, 5*time.Minute)
+		write(w, 200, map[string]any{"next": "code", "server_time": s.Now().Unix()})
+		return
+	}
+	if s.Config.Mode == "https" {
+		// An administrator from before second factors enrols one now, bound to this password step.
+		s.startEnrolment(w, r, store.Enrolment{Kind: "upgrade", Email: email, Binding: security.Hash(current)}, func(enrolHash, sealed string) error {
+			return s.Store.BeginUpgrade(r.Context(), enrolHash, sealed, s.Now())
+		})
 		return
 	}
 	token := security.Token()
@@ -368,7 +432,10 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metadata_unavailable", "Logout could not be saved. Try again.")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: s.cookieName(), Value: "", Path: "/", HttpOnly: true, Secure: s.Config.Mode == "https", SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	s.abandonSteps(r)
+	for _, kind := range []string{"session", "pending", "enrol"} {
+		s.clearCookie(w, kind)
+	}
 	w.WriteHeader(204)
 }
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +454,39 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	var sqliteVersion string
 	_ = s.Store.DB.QueryRowContext(r.Context(), "SELECT sqlite_version()").Scan(&sqliteVersion)
-	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": "not_configured", "database_access": s.databaseAccess()})
+	maintenance, _ := s.Store.Maintenance(r.Context())
+	write(w, 200, map[string]any{"ready": sqliteOK && pgErr == nil, "maintenance": maintenance, "host": hoststatus.Read(s.HostPaths, s.Config.Mode, s.Now()), "sqlite": map[string]string{"status": sqliteStatus, "version": sqliteVersion}, "postgres": map[string]string{"status": pgStatus, "version": version}, "versions": s.Versions, "backups": s.backupStatus(r), "database_access": s.databaseAccess()})
+}
+
+// backupStatus answers from the reconciled view in SQLite, so it stays cheap
+// and keeps working while PostgreSQL or the worker is down.
+func (s *Server) backupStatus(r *http.Request) string {
+	configured, target := s.storageTarget(r)
+	if !configured {
+		return "not_configured"
+	}
+	state, e := s.Store.StorageTarget(r.Context(), target)
+	if e != nil {
+		return "unavailable"
+	}
+	if state.ReconciledAt == 0 {
+		return "checking"
+	}
+	if failures, e := s.Store.BackupFailures(r.Context()); e == nil && len(failures) > 0 {
+		return "failing"
+	}
+	policy, e := s.Store.BackupPolicy(r.Context())
+	if e != nil {
+		return "unavailable"
+	}
+	late, e := s.Store.LateProjects(r.Context(), target, s.Config.ID, policy.Interval(), s.Now())
+	if e != nil {
+		return "unavailable"
+	}
+	if len(late) > 0 {
+		return "stale"
+	}
+	return "ok"
 }
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authorize(w, r); ok {

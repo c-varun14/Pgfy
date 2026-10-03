@@ -19,16 +19,17 @@ COPY web/embed.go web/embed.go
 COPY --from=frontend /src/web/dist web/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/pgfy ./cmd/pgfy
+ARG GO_TAGS=
+RUN CGO_ENABLED=0 go build -tags "${GO_TAGS}" -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/pgfy ./cmd/pgfy
 
 FROM ${POSTGRES_IMAGE}
 # The base image ships no CA bundle; backups need to verify object-storage TLS.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 pgfy && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin pgfy \
     && mkdir -p /data && chown 10001:10001 /data \
-    && psql --version | grep -E '18\.6([[:space:]]|$)' \
-    && pg_dump --version | grep -E '18\.6([[:space:]]|$)' \
-    && pg_restore --version | grep -E '18\.6([[:space:]]|$)'
+    && psql --version | grep -E ' 18\.[0-9]+([[:space:]]|$)' \
+    && pg_dump --version | grep -E ' 18\.[0-9]+([[:space:]]|$)' \
+    && pg_restore --version | grep -E ' 18\.[0-9]+([[:space:]]|$)'
 COPY --from=backend /out/pgfy /usr/local/bin/pgfy
 USER 10001:10001
 WORKDIR /data

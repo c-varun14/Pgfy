@@ -11,13 +11,16 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/c-varun14/Pgfy/internal/alerts"
 	"github.com/c-varun14/Pgfy/internal/config"
 	"github.com/c-varun14/Pgfy/internal/hba"
+	"github.com/c-varun14/Pgfy/internal/hoststatus"
 	"github.com/c-varun14/Pgfy/internal/httpapi"
 	"github.com/c-varun14/Pgfy/internal/jobs"
 	"github.com/c-varun14/Pgfy/internal/postgres"
@@ -26,6 +29,8 @@ import (
 	"github.com/c-varun14/Pgfy/internal/store"
 	"github.com/c-varun14/Pgfy/web"
 )
+
+const usage = "usage: pgfy [serve|version|health [ready]|setup-token|initialize-store|reset-admin|maintenance on|off|status|jobs running|store-snapshot <path>|store-restore [--check] <path>]"
 
 var version = "dev"
 var commit = "unknown"
@@ -62,11 +67,17 @@ func run() error {
 		}
 		return nil
 	}
+	dbPath := config.Env("PGFY_DB", "/data/pgfy.db")
+	if command == "store-snapshot" || command == "store-restore" {
+		// Run by the host updater with the release that owns the data, before
+		// any configuration or migration: a snapshot must be taken and restored
+		// whatever schema the file carries.
+		return storeFile(command, os.Args[2:], dbPath)
+	}
 	cfg, e := config.Load(config.Env("PGFY_CONFIG", "/etc/pgfy/install.json"))
 	if e != nil {
 		return errors.New("invalid or missing installation configuration")
 	}
-	dbPath := config.Env("PGFY_DB", "/data/pgfy.db")
 	var s *store.Store
 	var storeErr error
 	if command == "initialize-store" {
@@ -116,8 +127,33 @@ func run() error {
 		fmt.Println(token)
 		return nil
 	}
+	if command == "reset-admin" {
+		// The token goes to the operator's terminal only; its hash is stored.
+		if storeErr != nil {
+			return errors.New("management storage unavailable")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		token, e := s.NewResetToken(ctx, time.Now())
+		if errors.Is(e, store.ErrSetup) {
+			return errors.New("no administrator exists yet; use setup-token")
+		}
+		if e != nil {
+			return errors.New("management storage unavailable")
+		}
+		fmt.Println(token)
+		return nil
+	}
+	if command == "maintenance" || command == "jobs" {
+		if storeErr != nil {
+			return errors.New("management storage unavailable")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return hostCommand(ctx, s, command, os.Args[2:])
+	}
 	if command != "serve" {
-		return errors.New("usage: pgfy [serve|version|health [ready]|setup-token|initialize-store]")
+		return errors.New(usage)
 	}
 	if storeErr != nil {
 		slog.Error("management storage initialization failed; readiness disabled")
@@ -164,13 +200,48 @@ func run() error {
 			return errors.New("invalid trusted proxy CIDR")
 		}
 	}
-	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json")}
+	hostPaths := hoststatus.Paths{Status: config.Env("PGFY_HOST_STATUS", "/etc/pgfy/host-status.json"), CertSync: config.Env("PGFY_CERT_SYNC", "/etc/pgfy/cert-sync.json"),
+		TLSState: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"), Certificate: config.Env("PGFY_TLS_CERT", "/etc/pgfy/postgres-tls/server.crt")}
+	var alerter *alerts.Engine
+	if s != nil {
+		// Alerts run whenever metadata is readable, independent of PostgreSQL management:
+		// a source that needs it is simply not checked without it.
+		alerter = &alerts.Engine{Store: s, Vault: vault, InstallationID: cfg.ID, Dashboard: cfg.Origin, Mode: cfg.Mode, Version: version, HostPaths: hostPaths, Postgres: pg.Check}
+		if mgmt != nil {
+			alerter.Budget = mgmt.ConnectionBudget
+		}
+		if worker != nil {
+			alerter.Backups = func(ctx context.Context) (alerts.Backups, bool) {
+				settings, e := worker.StorageSettings(ctx)
+				if errors.Is(e, jobs.ErrStorageNotConfigured) {
+					return alerts.Backups{}, true
+				}
+				if e != nil {
+					return alerts.Backups{}, false
+				}
+				target := settings.Target()
+				state, e := s.StorageTarget(ctx, target)
+				policy, pe := s.BackupPolicy(ctx)
+				if e != nil || pe != nil || state.ReconciledAt == 0 {
+					return alerts.Backups{}, false
+				}
+				return alerts.Backups{Configured: true, Target: target, Interval: policy.Interval()}, true
+			}
+		}
+	}
+	api := httpapi.Server{Config: cfg, Store: s, Vault: vault, PG: pg.Check, Assets: web.Assets(), Versions: versions, TrustedProxy: proxy, Mgmt: mgmt, Provisioner: provisioner, Jobs: worker, TLSStatePath: config.Env("PGFY_TLS_STATE", "/etc/pgfy/postgres-tls/state.json"), HostPaths: hostPaths, Alerts: alerter}
 	srv := http.Server{Addr: config.Env("PGFY_LISTEN", ":3000"), Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if provisioner != nil {
 		go provisioner.Run(ctx)
 		go worker.Run(ctx)
+	}
+	if alerter != nil {
+		go alerter.Run(ctx)
+	}
+	if s != nil {
+		go dailyCopies(ctx, s, dbPath)
 	}
 	go func() {
 		<-ctx.Done()
@@ -184,4 +255,78 @@ func run() error {
 		return errors.New("HTTP server failed")
 	}
 	return nil
+}
+
+// dailyCopies keeps one copy of management storage per day beside it: a minute
+// after start, so a fresh container makes today's copy, then every hour.
+func dailyCopies(ctx context.Context, s *store.Store, dbPath string) {
+	dir := filepath.Join(filepath.Dir(dbPath), "daily")
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	first := time.After(time.Minute)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-first:
+		case <-ticker.C:
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		if name, e := store.DailyCopy(copyCtx, s, dbPath, dir, time.Now()); e != nil {
+			slog.Warn("daily copy of management storage failed", "reason", e.Error())
+		} else if name != "" {
+			slog.Info("daily copy of management storage written", "file", filepath.Base(name))
+		}
+		cancel()
+	}
+}
+
+// hostCommand serves the updater: it quiesces the installation and reports
+// whether heavy work is running. Output is a single word or number.
+func hostCommand(ctx context.Context, s *store.Store, command string, args []string) error {
+	if len(args) != 1 {
+		return errors.New(usage)
+	}
+	switch command + " " + args[0] {
+	case "maintenance on", "maintenance off":
+		return s.SetMaintenance(ctx, args[0] == "on")
+	case "maintenance status":
+		on, e := s.Maintenance(ctx)
+		if e != nil {
+			return e
+		}
+		if on {
+			fmt.Println("on")
+		} else {
+			fmt.Println("off")
+		}
+		return nil
+	case "jobs running":
+		n, e := s.RunningJobs(ctx)
+		if e != nil {
+			return e
+		}
+		fmt.Println(n)
+		return nil
+	}
+	return errors.New(usage)
+}
+
+func storeFile(command string, args []string, dbPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	check := len(args) == 2 && args[0] == "--check"
+	if len(args) != 1 && !check {
+		return errors.New(usage)
+	}
+	path := args[len(args)-1]
+	switch {
+	case command == "store-snapshot" && !check:
+		return store.Snapshot(ctx, dbPath, path)
+	case command == "store-restore" && check:
+		return store.CheckSnapshot(ctx, path)
+	case command == "store-restore":
+		return store.Restore(ctx, path, dbPath)
+	}
+	return errors.New(usage)
 }

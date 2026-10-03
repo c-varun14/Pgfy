@@ -4,6 +4,9 @@
 Only resources bearing a fresh pgfy_test_* identity are created and removed.
 Run after scripts/build-image.py. Public ports are never opened by this fixture.
 """
+import base64
+import hashlib
+import hmac
 import http.cookiejar
 import importlib.util
 import json
@@ -21,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("installer", ROOT / "deploy/installer.py")
 host = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(host)
+# A fixed host size, so the PostgreSQL memory the fixture asserts does not depend on the runner.
+host.host_memory_mib = lambda: 2048
 
 def run(args, **kwargs):
     return subprocess.run([str(x) for x in args], text=True, capture_output=True, check=True, timeout=240, **kwargs)
@@ -32,6 +37,89 @@ class patch_atomic_owner:
         host.atomic = lambda path, data, mode=0o600, uid=None, gid=None: self.original(path, data, mode)
     def __exit__(self, *exc):
         host.atomic = self.original
+
+def write_bundle(directory, version, application_image, images):
+    """A release bundle from this checkout's deploy files, pointing at a locally built application image."""
+    import hashlib
+    directory.mkdir(parents=True)
+    names = ["installer.py", "install.sh", "pgfyctl", "compose.yaml", "compose.https.yaml", "compose.tunnel.yaml", "postgres/init.sh", "postgres/health.sh"]
+    for name in names:
+        (directory / name).parent.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_bytes((ROOT / "deploy" / name).read_bytes())
+    release = {"version": version, "images": {"application": application_image, "postgres": images["postgres"], "caddy": images["caddy"]}}
+    (directory / "release.json").write_text(json.dumps(release))
+    names.append("release.json")
+    (directory / "SHA256SUMS").write_text("".join(f"{hashlib.sha256((directory / n).read_bytes()).hexdigest()}  {n}\n" for n in names))
+    return release
+
+def update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed):
+    """pgfyctl update: a failure after the new release migrated rolls everything back; a clean update commits."""
+    current = write_bundle(directory / "releases/v0.0.1", "v0.0.1", application_image, images)
+    state = dict(installation.state, release="v0.0.1", images=current["images"], stage="installed")
+    host.json_write(directory / "state.json", state)
+    cfg = dict(installation.config(), release="v0.0.1")
+    host.json_write(directory / "config/install.json", cfg, 0o644)
+    host.atomic(directory / "compose.env", host.compose_env(directory, state, cfg))
+    host.write_pgfyctl(directory, directory / "releases/v0.0.1")
+    write_bundle(directory / "incoming/pgfy-v0.0.2", "v0.0.2", next_image, images)
+    def probe(query):
+        run([*helper, "mkdir -p /fixture/probe && cp /fixture/data/sqlite/pgfy.db* /fixture/probe/ && chmod -R a+rwX /fixture/probe"])
+        import sqlite3
+        with sqlite3.connect(directory / "probe/pgfy.db") as db:
+            result = db.execute(query).fetchall()
+        run([*helper, "rm -rf /fixture/probe"])
+        return result
+    def signed_in():
+        assert request("/api/v1/auth/login", {"email": "admin@example.com", "password": password})[0] == 200
+        code, session = request("/api/v1/auth/session")
+        assert code == 200
+        return session
+    def project_ids():
+        return sorted((p["id"], p["name"], p["stage"]) for p in request("/api/v1/projects")[1]["projects"])
+    projects_before = project_ids()
+    original = {"DIGEST": host.DIGEST, "pull_images": host.pull_images, "run_converge": host.run_converge, "verify": host.Installation.verify, "converge_host": host.converge_host}
+    verified = []
+    def verify_then_fail_once(self, require_dependencies=True):
+        original["verify"](self, require_dependencies)
+        verified.append(self.state["release"])
+        if len(verified) == 1:
+            migrated = probe("SELECT name FROM schema_migrations WHERE name='999_updatetest.sql'")
+            assert migrated, "the new release did not migrate before the injected failure"
+            raise host.InstallError("injected failure after the new release migrated")
+    host.DIGEST = __import__("re").compile(r"[a-zA-Z0-9./:_-]+(@sha256:[a-f0-9]{64})?\Z")  # local images carry no registry digest
+    host.pull_images = lambda images: None
+    host.converge_host = lambda root, mode: None  # systemd units under /etc are not the fixture's to write
+    host.run_converge = lambda installation, bundle, lock_fd: host.converge_installation(installation)
+    host.Installation.verify = verify_then_fail_once
+    try:
+        with patch_atomic_owner():
+            try:
+                host.update(directory, directory / "incoming/pgfy-v0.0.2")
+                raise AssertionError("the injected failure did not stop the update")
+            except host.InstallError as error:
+                assert "Restored v0.0.1" in str(error), error
+            assert verified == ["v0.0.2", "v0.0.1"], verified
+            assert host.read_json(directory / "state.json")["release"] == "v0.0.1"
+            assert not (directory / "update-rollback").exists()
+            assert not probe("SELECT name FROM schema_migrations WHERE name='999_updatetest.sql'"), "rollback kept the new schema"
+            session = signed_in()
+            assert project_ids() == projects_before
+            status = request("/api/v1/system/status")[1]
+            assert status["ready"] and not status["maintenance"] and status["versions"]["application"] != "v0.0.2"
+            passed("an update that fails after migrating restores the previous release, its storage snapshot and configuration")
+            host.update(directory, directory / "incoming/pgfy-v0.0.2")
+            assert host.read_json(directory / "state.json")["release"] == "v0.0.2"
+            assert "releases/v0.0.2/installer.py" in (directory / "pgfyctl").read_text()
+            assert probe("SELECT count(*) FROM schema_migrations WHERE name='999_updatetest.sql'") == [(1,)]
+            assert request("/api/v1/projects")[0] == 401, "sessions from before the update stayed valid"
+            session = signed_in()
+            assert project_ids() == projects_before
+            status = request("/api/v1/system/status")[1]
+            assert status["ready"] and not status["maintenance"] and status["versions"]["application"] == "v0.0.2"
+            assert request("/api/v1/projects", {"name": "after-update"}, session["csrf_token"])[0] == 202
+            passed("pgfyctl update migrates, verifies, resumes backups and signs sessions out")
+    finally:
+        host.DIGEST, host.pull_images, host.run_converge, host.Installation.verify, host.converge_host = original["DIGEST"], original["pull_images"], original["run_converge"], original["verify"], original["converge_host"]
 
 def main():
     started = time.monotonic()
@@ -62,6 +150,7 @@ def main():
         secret_values = {"bootstrap_password": secrets.token_hex(32).encode(), "health_password": secrets.token_hex(32).encode(), "management_password": secrets.token_hex(32).encode(), "encryption_key": secrets.token_bytes(32)}
         for name, value in secret_values.items():
             (directory / "secrets" / name).write_bytes(value)
+        os.environ["PGFY_SCHEDULE_INTERVAL"] = "1m"  # scheduling passes the fixture can wait for
         (directory / "compose.env").write_text(host.compose_env(directory, dict(installation.state, images=dict(images, application=application_image)), cfg))
         base = ["docker", "compose", "--project-name", project, "--env-file", directory / "compose.env", "-f", ROOT / "deploy/compose.yaml"]
         def compose(*args, **kwargs):
@@ -108,7 +197,10 @@ def main():
             compose("run", "--rm", "--no-deps", "application", "initialize-store")
             compose("up", "-d")
             wait_ready()
-            passed("three-service startup, authenticated PostgreSQL readiness, SQLite, Caddy routing")
+            shared_buffers, effective_cache = host.postgres_memory(2048)
+            sized = sql("SELECT string_agg(name || '=' || (setting::bigint * 8 / 1024)::text, ',' ORDER BY name) FROM pg_settings WHERE name IN ('effective_cache_size','shared_buffers');")
+            assert sized == f"effective_cache_size={effective_cache},shared_buffers={shared_buffers}", ("memory sizing not applied", sized)
+            passed("three-service startup, authenticated PostgreSQL readiness, SQLite, Caddy routing; PostgreSQL memory sized from the host")
             assert "<div id=\"root\">" in request("/")[1]
             token = compose("exec", "-T", "application", "pgfy", "setup-token").stdout.strip()
             password = "integration passphrase that is long"
@@ -212,20 +304,104 @@ def main():
             finally:
                 probe.wait(timeout=60)
             passed("connection check observes the application's TLS session as evidence")
+            # --- Access and capacity: reserved slots, guardrails, limits, rotation ---
+            shop_role, blog = projects["Shop"]["credentials"]["user"], projects["Blog"]["id"]
+            assert sql("SHOW reserved_connections;") == "10"
+            assert sql("SELECT pg_has_role('pgfy_mgmt','pg_use_reserved_connections','MEMBER') AND pg_has_role('pgfy_health','pg_use_reserved_connections','MEMBER');") == "t"
+            def role_config(role):
+                return sql(f"SELECT array_to_string(s.setconfig, ',') FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='{role}' AND s.setdatabase=0;")
+            for expected in ("statement_timeout=60000ms", "idle_in_transaction_session_timeout=300000ms", "temp_file_limit=1048576kB", "lock_timeout=10000ms"):
+                assert expected in role_config(shop_role), role_config(shop_role)
+            assert psql(remote_url("Shop"), "SHOW statement_timeout;").stdout.strip() == "1min"
+            refused = psql(remote_url("Shop"), "SET temp_file_limit = -1;")
+            assert refused.returncode != 0 and "permission denied" in refused.stderr, refused.stderr
+            assert psql(remote_url("Shop"), f"ALTER ROLE {shop_role} CONNECTION LIMIT 100;").returncode != 0
+            limits = request(f"/api/v1/projects/{shop}")[1]["project"]["limits"]
+            change = {key: limits[key] for key in ("statement_timeout_ms", "idle_in_transaction_ms", "temp_file_limit_kb", "lock_timeout_ms", "connection_limit")}
+            code, updated = request(f"/api/v1/projects/{shop}/limits", dict(change, statement_timeout_ms=30000, connection_limit=30, revision=limits["revision"]), session["csrf_token"], "PUT")
+            assert code == 200 and updated["applied_revision"] == updated["revision"], (code, updated)
+            assert sql(f"SELECT rolconnlimit FROM pg_roles WHERE rolname='{shop_role}';") == "30"
+            assert psql(remote_url("Shop"), "SHOW statement_timeout;").stdout.strip() == "30s"
+            assert "default_transaction_read_only" not in role_config(shop_role), "limits must not disturb the write freeze setting"
+            code, budget = request("/api/v1/system/connections")
+            assert code == 200 and budget["reserved"] == 10 and budget["available"] == budget["max_connections"] - budget["superuser_reserved"] - 10, budget
+            assert any(r["project"] == "Shop" and r["limit"] == 30 for r in budget["roles"]) and {r["role"] for r in budget["system"]} == {"pgfy_mgmt", "pgfy_health"}, budget
+            passed("reserved slots for management and health; guardrails set, enforced where PostgreSQL allows, changeable per project; budget reported")
+            old_url = remote_url("Blog")
+            blog_role = projects["Blog"]["credentials"]["user"]
+            holder = subprocess.Popen(["docker", "run", "--rm", "--network", project + "_dbpublic", "--entrypoint", "psql", images["postgres"], old_url, "-c", "select pg_sleep(60)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(30):
+                    if sql(f"SELECT count(*) FROM pg_stat_activity WHERE usename='{blog_role}';") != "0":
+                        break
+                    time.sleep(1)
+                else:
+                    raise AssertionError("the session holding the old password never connected")
+                code, rotated = request(f"/api/v1/projects/{blog}/credentials/rotate", {}, session["csrf_token"])
+                assert code == 200 and rotated["credentials"]["password"] != projects["Blog"]["credentials"]["password"], (code, rotated)
+                assert holder.wait(timeout=30) != 0, "the session using the old password survived the rotation"
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+            assert psql(old_url, "SELECT 1;").returncode != 0, "the old password still works"
+            projects["Blog"]["credentials"] = rotated["credentials"]
+            assert psql(remote_url("Blog"), "SELECT x FROM t;").stdout.strip() == "1"
+            code, revealed = request(f"/api/v1/projects/{blog}/credentials")
+            assert code == 200 and revealed["password"] == rotated["credentials"]["password"] and not revealed["rotation_pending"]
+            listed = {p["id"]: p["open_to_internet"] for p in request("/api/v1/projects")[1]["projects"]}
+            for name in ("Shop", "Blog"):
+                addresses = request(f"/api/v1/projects/{projects[name]['id']}")[1]["project"]["policy"]["addresses"]
+                assert listed[projects[name]["id"]] == any(a in ("0.0.0.0/0", "::/0") for a in addresses), (name, addresses, listed)
+            passed("rotation ends sessions using the old password, which stops working; the new one is the one revealed")
             # --- Backups against a disposable S3-compatible store on the proxy network ---
             minio_secret = secrets.token_hex(16)
             minio_name = project.replace("_", "-") + "-minio"  # S3 clients need a valid hostname
             (directory / "minio/pgfy-backups").mkdir()
-            run(["docker", "run", "-d", "--name", minio_name, "--network", project + "_proxy", "-e", "MINIO_ROOT_USER=pgfytest", "-e", "MINIO_ROOT_PASSWORD=" + minio_secret, "-v", f"{directory}/minio:/data", images["minio_test"], "server", "/data"])
+            run(["docker", "run", "-d", "--name", minio_name, "--network", project + "_proxy", "-e", "MINIO_ROOT_USER=pgfytest", "-e", "MINIO_ROOT_PASSWORD=" + minio_secret, "-v", f"{directory}/minio:/data", os.environ.get("PGFY_TEST_MINIO_IMAGE", images["minio_test"]), "server", "/data"])
             time.sleep(3)
-            storage = {"endpoint": f"http://{minio_name}:9000", "region": "us-east-1", "bucket": "pgfy-backups", "prefix": "pgfy/test", "access_key": "pgfytest", "secret_key": minio_secret, "session_token": "", "path_style": True}
+            storage = {"endpoint": f"http://{minio_name}:9000", "region": "us-east-1", "bucket": "pgfy-backups", "prefix": "pgfy/test", "access_key": "pgfytest", "secret_key": minio_secret, "session_token": "", "path_style": True, "private_endpoint": True, "bucket_protection": "versioning"}
+            # A plaintext endpoint is only allowed for a private address, and a bucket
+            # that reports versioning off is refused whichever protection is chosen.
+            assert request("/api/v1/settings/storage", dict(storage, private_endpoint=False), session["csrf_token"], "PUT")[0] == 400, "plaintext public endpoint accepted"
+            for protection in ("versioning", "acknowledged"):
+                code, refused = request("/api/v1/settings/storage", dict(storage, bucket_protection=protection), session["csrf_token"], "PUT")
+                assert code == 400 and "versioning" in str(refused), (protection, code, refused)
+            def mc(command, **kwargs):
+                # MinIO keeps each object as a directory of its own, so the fixture
+                # manipulates the bucket through the S3 API rather than the disk.
+                return run(["docker", "exec", "-i", minio_name, "sh", "-c", f"mc --quiet {command}"], **kwargs)
+            run(["docker", "exec", minio_name, "sh", "-c", f"mc alias set fixture http://127.0.0.1:9000 pgfytest {minio_secret}"])
+            mc("version enable fixture/pgfy-backups")
+            def clone_backup(db_name, source, folder, rows=None):
+                """Copy one backup to another timestamp, keeping the manifest consistent."""
+                base = f"fixture/pgfy-backups/pgfy/test/backups/{db_name}"
+                document = json.loads(mc(f"cat {base}/{source}/manifest.json").stdout)
+                at = time.strptime(folder, "%Y%m%dT%H%M%SZ")
+                document["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", at)
+                document["archive_key"] = document["archive_key"].replace(source, folder)
+                document["manifest_key"] = document["manifest_key"].replace(source, folder)
+                if rows is not None:
+                    for table in document["tables"]:
+                        table["rows"] = rows
+                mc(f"cp {base}/{source}/archive.dump {base}/{folder}/archive.dump")
+                mc(f"pipe {base}/{folder}/manifest.json", input=json.dumps(document))
+                return f"pgfy/test/backups/{db_name}/{folder}/manifest.json"
             code, saved = request("/api/v1/settings/storage", storage, session["csrf_token"], "PUT")
             assert code == 200 and saved["settings"]["secret_key"].startswith("••••") and minio_secret not in json.dumps(saved), (code, saved)
+            assert saved["settings"]["protection_state"] == "enabled", saved
             code, checked = request("/api/v1/settings/storage/check", {}, session["csrf_token"])
-            assert code == 200 and checked["ok"] and [s["name"] for s in checked["steps"]] == ["upload", "list", "download", "cleanup"], (code, checked)
-            code, discovered = request("/api/v1/recovery/backups")
-            assert code == 200 and discovered["state"] == "ok" and discovered["backups"] == [], discovered
-            passed("storage settings sealed and masked; upload/list/download/cleanup check passes")
+            assert code == 200 and checked["ok"] and [s["name"] for s in checked["steps"]] == ["upload", "list", "download", "cleanup", "protection"], (code, checked)
+            def discovery():
+                # An empty bucket is a complete answer, so reconciliation settles quickly.
+                for _ in range(30):
+                    code, body = request("/api/v1/recovery/backups")
+                    assert code == 200, (code, body)
+                    if body["state"] == "ok":
+                        return body
+                    time.sleep(1)
+                raise AssertionError(body)
+            assert discovery()["state"] == "ok", "the bucket was never read completely"
+            passed("storage protection required and verified; upload/list/download/cleanup/protection check passes")
             def wait_job(job_id, timeout=120):
                 deadline = time.monotonic() + timeout
                 while True:
@@ -235,17 +411,47 @@ def main():
                         return job
                     assert time.monotonic() < deadline, job
                     time.sleep(1)
+            def wait_idle(timeout=240):
+                deadline = time.monotonic() + timeout
+                while True:
+                    body = request("/api/v1/recovery/backups")[1]
+                    if not body.get("busy"):
+                        return body
+                    assert time.monotonic() < deadline, body
+                    time.sleep(1)
+            # Configuring storage makes every ready database overdue, so the
+            # schedule starts backing them up without anyone asking.
+            for _ in range(240):
+                histories = {name: request(f"/api/v1/projects/{item['id']}/backups")[1] for name, item in projects.items()}
+                if all(history["newest_backup_at"] for history in histories.values()):
+                    break
+                time.sleep(1)
+            assert all(history["newest_backup_at"] for history in histories.values()), histories
+            assert all(job["scheduled"] for history in histories.values() for job in history["jobs"] if job["kind"] == "backup"), histories
+            passed("scheduled backups start on their own once storage is configured")
+            wait_idle()
+            before = len(request(f"/api/v1/projects/{shop}/backups")[1]["backups"])
             code, job = request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])
             assert code == 202, (code, job)
             assert request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])[0] == 409, "second heavy job must wait"
             job = wait_job(job["id"])
             assert job["state"] == "succeeded" and job["result"]["sha256"] and job["result"]["tables"] == [{"schema": "public", "name": "guestbook", "rows": 1}], job
+            assert job["result"]["objects"], "object baselines were not captured"
             code, history = request(f"/api/v1/projects/{shop}/backups")
-            assert code == 200 and len(history["backups"]) == 1 and history["next_scheduled_at"] > 0 and history["storage_configured"], history
+            assert code == 200 and len(history["backups"]) == before + 1 and history["next_scheduled_at"] > 0 and history["storage_configured"], history
+            assert history["target_interval_hours"] == 24 and history["failures"] == 0, history
             manifest_key = history["backups"][0]["object_key"]
+            # The age the dashboard shows comes from the bucket, not from history.
+            for _ in range(30):
+                history = request(f"/api/v1/projects/{shop}/backups")[1]
+                if history["newest_backup_at"]:
+                    break
+                time.sleep(1)
+            assert history["newest_backup_at"] == history["backups"][0]["created_at"], history
             assert (directory / "minio/pgfy-backups/pgfy/test/backups" / projects["Shop"]["db_name"]).exists()
             passed("manual backup dumps within one snapshot, uploads archive then manifest, records history")
             # An upload that cannot finish must never become a published backup after a restart.
+            blog_recoverable = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]["newest_backup_at"]
             run(["docker", "pause", minio_name])
             code, stuck = request(f"/api/v1/projects/{projects['Blog']['id']}/backups", {}, session["csrf_token"])
             assert code == 202, (code, stuck)
@@ -259,17 +465,49 @@ def main():
             run(["docker", "unpause", minio_name])
             interrupted = request(f"/api/v1/jobs/{stuck['id']}")[1]
             assert interrupted["state"] == "interrupted" and interrupted["stage"] == "upload_archive", interrupted
-            # The schedule notices Blog has no backup yet and catches up after the restart; the
-            # interrupted job itself must never have published a manifest.
-            for _ in range(90):
+            # The half-finished upload must never become a recoverable backup: its
+            # archive is in the bucket, but without a manifest nothing offers it.
+            blog_before = blog_recoverable
+            for _ in range(60):
                 blog_history = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]
-                if blog_history["backups"] and not any(j["state"] in ("queued", "running") for j in blog_history["jobs"]):
+                if not any(j["state"] in ("queued", "running") for j in blog_history["jobs"]):
                     break
                 time.sleep(1)
-            assert blog_history["backups"] and blog_history["backups"][0]["job_id"] != stuck["id"], blog_history
-            assert {j["state"] for j in blog_history["jobs"]} == {"interrupted", "succeeded"}, blog_history["jobs"]
+            assert blog_history["newest_backup_at"] == blog_before, ("an interrupted upload became recoverable", blog_history)
+            assert all(j["id"] != stuck["id"] for j in blog_history["jobs"] if j["state"] == "succeeded"), blog_history["jobs"]
+            assert "interrupted" in {j["state"] for j in blog_history["jobs"]}, blog_history["jobs"]
+            blog_group = next(g for g in discovery()["databases"] if g["db_name"] == projects["Blog"]["db_name"])
+            assert all(b["state"] == "complete" for b in blog_group["backups"]), blog_group
             assert run([*helper, "ls -A /fixture/data/work"]).stdout.strip() == "", "workspace not cleaned"
-            passed("restart marks the in-flight backup interrupted without a manifest; the daily schedule catches up; workspace clean")
+            passed("restart marks the in-flight backup interrupted, its archive never becomes recoverable, workspace clean")
+            # Discovery lists every database separately, newest first, and the
+            # incomplete upload left behind is hidden rather than offered.
+            found = discovery()
+            groups = {group["db_name"]: group for group in found["databases"]}
+            assert set(groups) == {projects["Shop"]["db_name"], projects["Blog"]["db_name"]}, found
+            for group in groups.values():
+                assert group["count"] >= 1 and not group["foreign"] and not group["mixed"], group
+                assert [b["taken_at"] for b in group["backups"]] == sorted((b["taken_at"] for b in group["backups"]), reverse=True), group
+                assert all(b["state"] == "complete" for b in group["backups"]), group
+            assert groups[projects["Blog"]["db_name"]]["project_id"] == projects["Blog"]["id"], groups
+            assert request("/api/v1/recovery/backups?db=../etc")[0] == 400
+            assert request(f"/api/v1/recovery/backups?db={projects['Shop']['db_name']}&limit=500")[0] == 400
+            passed("discovery pages each database newest first and hides incomplete work")
+            # A backup removed from the bucket stops counting as recoverable, so the
+            # dashboard never offers something that is no longer there.
+            shop_backups = groups[projects["Shop"]["db_name"]]["backups"]
+            mc(f"rm fixture/pgfy-backups/{shop_backups[0]['manifest_key']}")
+            request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])  # the next backup reconciles the bucket
+            for _ in range(90):
+                history = request(f"/api/v1/projects/{shop}/backups")[1]
+                if not any(b["object_key"] == shop_backups[0]["manifest_key"] for b in history["backups"]):
+                    break
+                time.sleep(1)
+            assert not any(b["object_key"] == shop_backups[0]["manifest_key"] for b in history["backups"]), history
+            assert all(b["manifest_key"] != shop_backups[0]["manifest_key"] for g in discovery()["databases"] for b in g["backups"])
+            passed("a backup deleted outside the application stops being offered and stops counting as recoverable")
+            # Restore whatever is newest now: earlier checks deliberately removed a backup.
+            manifest_key = request(f"/api/v1/projects/{shop}/backups")[1]["backups"][0]["object_key"]
             code, restore = request("/api/v1/recovery/restores", {"manifest_key": manifest_key, "name": "Shop restored"}, session["csrf_token"])
             assert code == 202, (code, restore)
             job = wait_job(restore["job"]["id"], 180)
@@ -281,8 +519,127 @@ def main():
             assert psql(remote_url("Restored"), "SELECT entry FROM guestbook;").stdout.strip() == "hello from shop"
             assert "after restore" in psql(remote_url("Restored"), "INSERT INTO guestbook VALUES ('after restore') RETURNING entry;").stdout
             assert psql(remote_url("Shop"), "SELECT count(*) FROM guestbook;").stdout.strip() == "1", "original database must stay untouched"
-            assert request("/api/v1/recovery/restores", {"manifest_key": "pgfy/test/backups/nope/manifest.json", "name": "x"}, session["csrf_token"])[0] == 400
-            passed("restore into a new project verifies checksum, row counts, ownership; original untouched")
+            assert job["result"]["verification"] == "verified", job
+            for bad in ("pgfy/test/backups/nope/manifest.json", "pgfy/test/backups/app_x/latest/manifest.json", manifest_key.replace("manifest.json", "archive.dump")):
+                assert request("/api/v1/recovery/restores", {"manifest_key": bad, "name": "x"}, session["csrf_token"])[0] == 400, bad
+            passed("restore into a new project verifies checksum, row counts, objects, ownership; original untouched")
+            # A restore that cannot be fully verified says so, and still leaves a
+            # usable database rather than hiding it behind a failed job.
+            folder = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() - 2 * 86400))
+            doubtful = clone_backup(projects["Shop"]["db_name"], manifest_key.split("/")[-2], folder, rows=99)
+            code, restore = request("/api/v1/recovery/restores", {"manifest_key": doubtful, "name": "Shop doubtful"}, session["csrf_token"])
+            assert code == 202, (code, restore)
+            job = wait_job(restore["job"]["id"], 180)
+            assert job["state"] == "succeeded" and job["result"]["verification"] == "failed" and not job["result"]["verified"], job
+            assert any(not c["ok"] for c in job["result"]["checks"]), job["result"]["checks"]
+            doubtful_project = request(f"/api/v1/projects/{restore['project']['id']}")[1]["project"]
+            assert doubtful_project["stage"] == "ready", doubtful_project
+            projects["Doubtful"] = dict(restore["project"], credentials=request(f"/api/v1/projects/{restore['project']['id']}/credentials")[1])
+            assert psql(remote_url("Doubtful"), "SELECT entry FROM guestbook;").stdout.strip() == "hello from shop"
+            passed("a restore that cannot be verified says so and still leaves a usable database")
+            # Deleting a database: the exact name confirms it, a database with no
+            # recent backup needs an acknowledgment, and an open session does not
+            # stop it. The database, its user and its access rule all go.
+            doubtful_path, doubtful_db = f"/api/v1/projects/{projects['Doubtful']['id']}", projects["Doubtful"]["db_name"]
+            assert request(doubtful_path, {"confirm_name": "shop doubtful"}, session["csrf_token"], "DELETE")[0] == 400
+            # Scheduled backups run every minute in this fixture, so the refusal is
+            # checked only while the restored database has no backup yet.
+            if not request(f"{doubtful_path}/backups")[1]["newest_backup_at"]:
+                code, refused = request(doubtful_path, {"confirm_name": "Shop doubtful"}, session["csrf_token"], "DELETE")
+                assert code == 409 and "backup_required" in refused, (code, refused)
+            holder = subprocess.Popen(["docker", "run", "--rm", "--network", project + "_dbpublic", "--entrypoint", "psql", images["postgres"], remote_url("Doubtful"), "-c", "select pg_sleep(120)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(30):
+                    if sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{doubtful_db}';") != "0":
+                        break
+                    time.sleep(1)
+                assert sql(f"SELECT count(*) FROM pg_stat_activity WHERE datname='{doubtful_db}';") != "0", "the held session never connected"
+                code, deletion_request = request(doubtful_path, {"confirm_name": "Shop doubtful", "acknowledge_no_recent_backup": True}, session["csrf_token"], "DELETE")
+                assert code == 202 and deletion_request["project"]["stage"] == "deleting" and deletion_request["job"]["kind"] == "delete", (code, deletion_request)
+                for _ in range(180):
+                    if request(doubtful_path)[0] == 404:
+                        break
+                    time.sleep(1)
+                assert request(doubtful_path)[0] == 404, request(doubtful_path)
+            finally:
+                holder.kill()
+            assert sql(f"SELECT count(*) FROM pg_database WHERE datname='{doubtful_db}';") == "0"
+            assert sql(f"SELECT count(*) FROM pg_roles WHERE rolname='{doubtful_db}';") == "0"
+            assert sql(f"SELECT count(*) FROM pg_hba_file_rules WHERE '{doubtful_db}' = ANY(user_name);") == "0"
+            assert psql(remote_url("Doubtful"), "SELECT 1;").returncode != 0
+            assert psql(remote_url("Restored"), "SELECT entry FROM guestbook;").returncode == 0, "another database was touched"
+            assert all(p["id"] != projects["Doubtful"]["id"] for p in request("/api/v1/projects")[1]["projects"])
+            del projects["Doubtful"]
+            passed("deleting a database needs its exact name and a backup or an acknowledgment, ends sessions, and drops the database, user and rule")
+            # A minute after it starts, the application keeps a daily copy of its
+            # management storage beside it; the copy passes the integrity check.
+            for _ in range(120):
+                copies = run([*helper, "ls /fixture/data/sqlite/daily/ 2>/dev/null || true"]).stdout.split()
+                if any(name.startswith("pgfy-") and name.endswith(".db") for name in copies):
+                    break
+                time.sleep(1)
+            assert any(name.startswith("pgfy-") and name.endswith(".db") for name in copies), ("no daily copy of management storage", copies)
+            copy = next(name for name in copies if name.startswith("pgfy-") and name.endswith(".db"))
+            run(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", "10001:10001", "-v", f"{directory}/data/sqlite:/data", application_image, "store-restore", "--check", "/data/daily/" + copy])
+            passed("the application keeps a daily copy of management storage that passes an integrity check")
+            # Retention keeps the last day whole, then one backup per older day.
+            # Older backups are made by copying one to an earlier timestamp, with
+            # the manifest kept consistent with the folder holding it.
+            def shop_objects():
+                # Listed recursively: a versioned bucket keeps showing a folder whose
+                # objects are all deleted, so only real objects are counted here.
+                listing = mc(f"ls --recursive fixture/pgfy-backups/pgfy/test/backups/{projects['Shop']['db_name']}/").stdout
+                found = {}
+                for line in listing.splitlines():
+                    if "/" in line:
+                        folder, name = line.split()[-1].split("/")[-2:]
+                        found.setdefault(folder, set()).add(name)
+                return found
+            newest = sorted(shop_objects())[-1]
+            aged = []
+            for days in (10, 20):
+                folder = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() - days * 86400))
+                clone_backup(projects["Shop"]["db_name"], newest, folder)
+                aged.append(folder)
+            assert request("/api/v1/settings/backups", {"target_interval_hours": 24, "retention_daily": 1, "retention_weekly": 0}, session["csrf_token"], "PUT")[0] == 200
+            code, job = request(f"/api/v1/projects/{shop}/backups", {}, session["csrf_token"])
+            assert code == 202, (code, job)
+            assert wait_job(job["id"])["state"] == "succeeded"
+            for _ in range(60):
+                objects = shop_objects()
+                if not set(objects) & set(aged):
+                    break
+                time.sleep(1)
+            assert not set(objects) & set(aged), ("expired backups were kept", objects)
+            # Nothing is left half-deleted: every backup still offered has both
+            # objects, and the aged copies took their archives with them.
+            history = request(f"/api/v1/projects/{shop}/backups")[1]
+            offered = {b["object_key"].split("/")[-2] for b in history["backups"]}
+            assert offered and all(objects[folder] == {"manifest.json", "archive.dump"} for folder in offered), (offered, objects)
+            assert offered == {folder for folder, names in objects.items() if "manifest.json" in names}, (offered, objects)
+            passed("retention prunes older days to one backup each and leaves no manifest without its archive")
+            # Starvation regression: the oldest project is the one whose backups
+            # fail, which is exactly the case the previous scheduler never got
+            # past. Both projects are made due by emptying their folders, and the
+            # restored project's backup makes the application read the bucket again.
+            sql(f"ALTER DATABASE {projects['Shop']['db_name']} WITH ALLOW_CONNECTIONS false;")
+            for name in ("Shop", "Blog"):
+                mc(f"rm --recursive --force fixture/pgfy-backups/pgfy/test/backups/{projects[name]['db_name']}/")
+            code, job = request(f"/api/v1/projects/{projects['Restored']['id']}/backups", {}, session["csrf_token"])
+            assert code == 202, (code, job)
+            assert wait_job(job["id"])["state"] == "succeeded"
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                shop_schedule = request(f"/api/v1/projects/{shop}/backups")[1]
+                blog_history = request(f"/api/v1/projects/{projects['Blog']['id']}/backups")[1]
+                if shop_schedule["failures"] > 0 and blog_history["newest_backup_at"]:
+                    break
+                time.sleep(2)
+            assert shop_schedule["failures"] > 0, ("the failing project recorded no failure", shop_schedule["failures"], shop_schedule["jobs"][:2])
+            assert shop_schedule["next_scheduled_at"] > time.time(), ("no backoff after a failure", shop_schedule["next_scheduled_at"])
+            assert blog_history["newest_backup_at"], ("a failing project blocked another project's backup", blog_history["jobs"][:2])
+            sql(f"ALTER DATABASE {projects['Shop']['db_name']} WITH ALLOW_CONNECTIONS true;")
+            passed("a failing backup backs off and never blocks another project's schedule")
             sql("CREATE TABLE pgfy_internal.recognizable (value text); INSERT INTO pgfy_internal.recognizable VALUES ('phase-one-record');")
             volumes_before = sorted(m["Name"] for item in inspected for m in item["Mounts"] if m["Type"] == "volume")
             compose("restart")
@@ -340,6 +697,93 @@ def main():
             for value in sensitive_values:
                 assert value not in logs
             passed("setup token, password, and database credentials absent from container logs")
+            code, status = request("/api/v1/system/status")
+            assert code == 200 and status["host"]["state"] == "unknown", status.get("host")
+            host.host_status(installation)
+            code, status = request("/api/v1/system/status")
+            reported = status["host"]
+            assert reported["state"] == "ok" and {d["name"] for d in reported["disks"]} == {"postgres", "workspace", "root"}, reported
+            assert all(d.get("error") or d["free_percent"] > 0 for d in reported["disks"]), reported
+            assert reported["certificate"]["state"] == "not_used", reported
+            passed("host status written by the host timer's command is read by the application")
+            # --- Alerts to a webhook receiver on the proxy network (reached like MinIO, as a private endpoint) ---
+            sink_name = project.replace("_", "-") + "-sink"
+            receiver = r"""use IO::Socket::INET; $|=1;
+my $s = IO::Socket::INET->new(LocalPort => 8080, Listen => 5, ReuseAddr => 1) or die;
+while (my $c = $s->accept) { my ($len, $sig, $ts) = (0, "", "");
+  while (my $l = <$c>) { $l =~ s/\r?\n$//; last if $l eq ""; $len = $1 if $l =~ /^Content-Length:\s*(\d+)/i; $sig = $1 if $l =~ /^X-Pgfy-Signature:\s*(\S+)/i; $ts = $1 if $l =~ /^X-Pgfy-Timestamp:\s*(\S+)/i; }
+  my $b = ""; read($c, $b, $len) if $len; print "$sig\t$ts\t$b\n";
+  print $c "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"; close $c; }"""
+            run(["docker", "run", "-d", "--name", sink_name, "--network", project + "_proxy", "--entrypoint", "perl", images["postgres"], "-e", receiver])
+            hook_secret = "integration-signing-secret"
+            code, session = request("/api/v1/auth/session")  # earlier phases signed in again
+            assert code == 200, session
+            code, saved = request("/api/v1/settings/alerts", {"url": f"http://{sink_name}:8080/hooks/T0KEN", "secret": hook_secret, "private_endpoint": True}, session["csrf_token"], "PUT")
+            assert code == 200 and saved["configured"] and "T0KEN" not in json.dumps(saved), (code, saved)
+            for _ in range(15):  # the receiver may still be starting
+                code, tested = request("/api/v1/settings/alerts/test", {}, session["csrf_token"])
+                if code == 200 and tested["ok"]:
+                    break
+                time.sleep(1)
+            assert code == 200 and tested["ok"], tested
+            def deliveries():
+                out = []
+                for line in run(["docker", "logs", sink_name]).stdout.splitlines():
+                    signature, timestamp, body = line.split("\t", 2)
+                    expected = "sha256=" + hmac.new(hook_secret.encode(), (timestamp + "." + body).encode(), hashlib.sha256).hexdigest()
+                    assert signature == expected, "a delivery was not signed with the configured secret"
+                    out.append(json.loads(body))
+                return out
+            # The password change earlier in this run was queued as an event and is delivered now that a receiver exists.
+            deadline = time.monotonic() + 90
+            while not any(d["kind"] == "credential_rotated" for d in deliveries()):
+                assert time.monotonic() < deadline, deliveries()
+                time.sleep(2)
+            assert any(d["kind"] == "test" for d in deliveries())
+            assert all(d["installation_id"] == identifier and "T0KEN" not in json.dumps(d) for d in deliveries())
+            assert "T0KEN" not in compose("logs", "--no-color", "application").stdout
+            passed("alerts reach a signed webhook: a test message and the queued password-change event")
+            next_image = os.environ.get("PGFY_TEST_NEXT_IMAGE")
+            if next_image:
+                update_and_rollback(directory, installation, application_image, next_image, images, request, run, helper, password, passed)
+            # --- Second factor through the SSH-issued reset (tunnel mode gets one only this way) ---
+            def totp(key, at=None):
+                secret = base64.b32decode(key.replace(" ", "") + "=" * (-len(key.replace(" ", "")) % 8))
+                counter = int(at if at is not None else time.time()) // 30
+                digest = hmac.new(secret, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+                offset = digest[-1] & 0x0F
+                return "%06d" % ((int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF) % 1_000_000)
+            def next_step():
+                time.sleep(30 - time.time() % 30 + 1)  # a code is accepted once; wait for a fresh one
+            reset_token = compose("exec", "-T", "application", "pgfy", "reset-admin").stdout.strip()
+            assert len(reset_token) == 43 and reset_token not in compose("logs", "--no-color", "application").stdout
+            new_password = "a different integration passphrase"
+            code, enrol = request("/api/v1/auth/reset", {"token": reset_token, "password": new_password})
+            assert code == 200 and enrol["next"] == "enrol" and len(enrol["key"].replace(" ", "")) == 32, (code, enrol)
+            assert request("/api/v1/auth/login", {"email": "admin@example.com", "password": password})[1].get("csrf_token"), "the old password must work until the reset is confirmed"
+            earlier_session = [c for c in jar if c.name == "pgfy_tunnel_session"][0]
+            code, confirmed = request("/api/v1/auth/enrol/confirm", {"code": totp(enrol["key"])})
+            assert code == 200 and confirmed["csrf_token"], (code, confirmed)
+            assert request("/api/v1/auth/login", {"email": "admin@example.com", "password": password})[0] == 401, "the old password survived the reset"
+            replay = urllib.request.Request(cfg["origin"] + "/api/v1/auth/session", headers={"Cookie": f"pgfy_tunnel_session={earlier_session.value}"})
+            try:
+                urllib.request.build_opener(urllib.request.ProxyHandler({})).open(replay, timeout=10)
+                raise AssertionError("a session from before the reset still works")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401
+            next_step()
+            jar.clear()  # start signed out, as a new browser would
+            code, step = request("/api/v1/auth/login", {"email": "admin@example.com", "password": new_password})
+            assert code == 200 and step == {"next": "code", "server_time": step["server_time"]}, (code, step)
+            assert request("/api/v1/projects")[0] == 401, "a session existed before the code"
+            assert request("/api/v1/auth/code", {"code": totp(enrol["key"], time.time() - 3600)})[0] == 401, "an hour-old code was accepted"
+            code, session = request("/api/v1/auth/code", {"code": totp(enrol["key"])})
+            assert code == 200 and request("/api/v1/projects")[0] == 200, (code, session)
+            deadline = time.monotonic() + 90
+            while not any(d["kind"] == "admin_reset" for d in deliveries()):
+                assert time.monotonic() < deadline, "the reset was not alerted"
+                time.sleep(2)
+            passed("an SSH-issued reset enrols a second factor; the old password stops working; sign-in then needs a code; the reset is alerted")
             evidence["container_stats"] = compose("stats", "--no-stream", "--format", "json").stdout
             evidence["seconds"] = round(time.monotonic() - started, 2)
             evidence["volume_identities"] = volumes_before
@@ -352,7 +796,7 @@ def main():
         finally:
             # These resources are generated test artifacts, not installation data.
             subprocess.run([*base, "-f", ROOT / "deploy/compose.tunnel.yaml", "down", "--volumes", "--remove-orphans"], capture_output=True, timeout=90)
-            subprocess.run(["docker", "rm", "-f", project.replace("_", "-") + "-minio"], capture_output=True, timeout=60)
+            subprocess.run(["docker", "rm", "-f", project.replace("_", "-") + "-minio", project.replace("_", "-") + "-sink"], capture_output=True, timeout=60)
             run([*helper, f"chown -R {os.getuid()}:{os.getgid()} /fixture; chmod -R u+rwX /fixture"])
 
 if __name__ == "__main__":
