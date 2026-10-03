@@ -36,6 +36,21 @@ func TestRestoreErrorsAreCountedOverTheWholeStream(t *testing.T) {
 	}
 }
 
+// A diagnostic line longer than any buffer is skipped past, not stopped at:
+// the tool must not block on a full pipe, and later lines still count.
+func TestOverlongDiagnosticLineIsDrained(t *testing.T) {
+	run := runScript(t, `head -c 3000000 /dev/zero | tr '\0' x >&2; echo >&2; for i in $(seq 1 2000); do echo "pg_restore: error: query $i failed with a long enough message" >&2; done; echo "pg_restore: warning: errors ignored on restore: 2001" >&2; exit 1`, 20*time.Second)
+	if run.Err != nil {
+		t.Fatal("the tool stalled on an overlong line", run.Err)
+	}
+	if run.Exit != 1 || run.Errors != 2001 || run.Counted != "reported by the tool" {
+		t.Fatal("lines after the overlong one were lost", run.Exit, run.Errors, run.Counted)
+	}
+	if len(run.Excerpt) > 4096+200 {
+		t.Fatal("the excerpt is unbounded", len(run.Excerpt))
+	}
+}
+
 // Being killed, never starting, or running out of time are failures: nothing
 // about the database can be claimed afterwards.
 func TestToolFailuresAreNotRestoreResults(t *testing.T) {

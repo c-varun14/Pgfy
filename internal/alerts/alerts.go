@@ -27,11 +27,13 @@ const (
 	sealContext       = "setting:" + store.AlertWebhookSetting
 	sourceBackups     = "backups"
 	sourcePostgres    = "postgres"
-	sourceHost        = "host"
+	sourceDisk        = "disk"
+	sourceClock       = "clock"
 	sourceHostReport  = "host_report"
 	sourceConnections = "connections"
 	sourceBucket      = "bucket"
 	sourceCertificate = "certificate"
+	sourceCertSync    = "certificate_sync"
 )
 
 // Backups describes the backup target. Configured false means there is no
@@ -193,17 +195,33 @@ func (e *Engine) Evaluate(ctx context.Context, now time.Time) ([]store.AlertCond
 		active = append(active, condition("host_report_stale", "host_report_stale", sourceHostReport, "The host has stopped reporting disk and clock status",
 			"Disk and clock alerts cannot fire until it reports again. Check systemctl status pgfy-host-status.timer."))
 	} else {
-		checked[sourceHost] = true
+		// A fresh report can still hold failed measurements. Disks are one
+		// source, so one unmeasured disk keeps every disk condition as it was.
+		measured := len(host.Disks) > 0
+		for _, d := range host.Disks {
+			if d.Error != "" || d.TotalBytes <= 0 {
+				measured = false
+			}
+		}
+		checked[sourceDisk] = measured
 		active = append(active, diskConditions(host.Disks)...)
-		if host.NTPSynchronized != nil && !*host.NTPSynchronized {
-			active = append(active, condition("ntp_unsynchronised", "ntp_unsynchronised", sourceHost, "The host clock is not synchronised",
-				"Sign-in codes and certificate checks depend on the time. Check systemd-timesyncd."))
+		if host.NTPSynchronized != nil {
+			checked[sourceClock] = true
+			if !*host.NTPSynchronized {
+				active = append(active, condition("ntp_unsynchronised", "ntp_unsynchronised", sourceClock, "The host clock is not synchronised",
+					"Sign-in codes and certificate checks depend on the time. Check systemd-timesyncd."))
+			}
 		}
 	}
-	// In tunnel mode there is no database certificate: checked, and clear.
-	checked[sourceCertificate] = true
-	if e.Mode == "https" {
+	if e.Mode != "https" {
+		// In tunnel mode there is no database certificate: checked, and clear.
+		checked[sourceCertificate], checked[sourceCertSync] = true, true
+	} else {
 		c := host.Certificate
+		// Expiry is known for a trusted certificate that could be read; the
+		// placeholder has no expiry to report. An unreadable state is unknown.
+		checked[sourceCertificate] = c.State != "unknown" && (c.State != "trusted" || c.ExpiresAt != nil)
+		checked[sourceCertSync] = c.LastSync != nil
 		if c.Expiring && c.ExpiresAt != nil {
 			summary := "The database and dashboard certificate expires within 14 days"
 			if c.Expired {
@@ -213,7 +231,7 @@ func (e *Engine) Evaluate(ctx context.Context, now time.Time) ([]store.AlertCond
 				"Expires "+time.Unix(*c.ExpiresAt, 0).UTC().Format(time.RFC3339)+". Check that ports 80/443 reach Caddy, then run pgfyctl sync-db-cert."))
 		}
 		if c.LastSync != nil && !c.LastSync.OK {
-			active = append(active, condition("certificate_sync_failed", "certificate_sync_failed", sourceCertificate, "Delivering the certificate to PostgreSQL failed", c.LastSync.Message))
+			active = append(active, condition("certificate_sync_failed", "certificate_sync_failed", sourceCertSync, "Delivering the certificate to PostgreSQL failed", c.LastSync.Message))
 		}
 	}
 	if e.Backups == nil {
@@ -239,7 +257,7 @@ func diskConditions(disks []hoststatus.Disk) []store.AlertCondition {
 			continue
 		}
 		if d.Device == 0 {
-			out = append(out, condition("disk_low", "disk_low:"+d.Name, sourceHost, "Free disk space is under 15%", fmt.Sprintf("%s: %.0f%% free.", d.Name, d.FreePercent)))
+			out = append(out, condition("disk_low", "disk_low:"+d.Name, sourceDisk, "Free disk space is under 15%", fmt.Sprintf("%s: %.0f%% free.", d.Name, d.FreePercent)))
 			continue
 		}
 		groups[d.Device] = append(groups[d.Device], d)
@@ -250,7 +268,7 @@ func diskConditions(disks []hoststatus.Disk) []store.AlertCondition {
 			names = append(names, d.Name)
 		}
 		sort.Strings(names)
-		out = append(out, condition("disk_low", "disk_low:"+strings.Join(names, "+"), sourceHost, "Free disk space is under 15%",
+		out = append(out, condition("disk_low", "disk_low:"+strings.Join(names, "+"), sourceDisk, "Free disk space is under 15%",
 			fmt.Sprintf("%s: %.0f%% free.", strings.Join(names, ", "), group[0].FreePercent)))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })

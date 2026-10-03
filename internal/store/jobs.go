@@ -243,8 +243,8 @@ func (s *Store) CompleteBackupJob(ctx context.Context, id, projectID, state, sta
 		return e
 	}
 	if backup != nil {
-		if _, e = tx.ExecContext(ctx, "INSERT INTO backups(id,project_id,job_id,object_key,manifest,size_bytes,created_at) VALUES (?,?,?,?,?,?,?)",
-			backup.ID, backup.ProjectID, backup.JobID, backup.ObjectKey, backup.Manifest, backup.SizeBytes, backup.CreatedAt); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO backups(id,project_id,job_id,object_key,manifest,size_bytes,created_at,storage_target) VALUES (?,?,?,?,?,?,?,?)",
+			backup.ID, backup.ProjectID, backup.JobID, backup.ObjectKey, backup.Manifest, backup.SizeBytes, backup.CreatedAt, backup.StorageTarget); e != nil {
 			return e
 		}
 	}
@@ -281,22 +281,23 @@ func recordOutcome(ctx context.Context, tx *sql.Tx, projectID string, succeeded 
 }
 
 type Backup struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id"`
-	JobID     string `json:"job_id"`
-	ObjectKey string `json:"object_key"`
-	Manifest  string `json:"manifest"`
-	SizeBytes int64  `json:"size_bytes"`
-	CreatedAt int64  `json:"created_at"`
+	ID            string `json:"id"`
+	ProjectID     string `json:"project_id"`
+	JobID         string `json:"job_id"`
+	ObjectKey     string `json:"object_key"`
+	Manifest      string `json:"manifest"`
+	SizeBytes     int64  `json:"size_bytes"`
+	CreatedAt     int64  `json:"created_at"`
+	StorageTarget string `json:"-"`
 }
 
 func (s *Store) RecordBackup(ctx context.Context, b Backup) error {
-	_, e := s.DB.ExecContext(ctx, "INSERT INTO backups(id,project_id,job_id,object_key,manifest,size_bytes,created_at) VALUES (?,?,?,?,?,?,?)", b.ID, b.ProjectID, b.JobID, b.ObjectKey, b.Manifest, b.SizeBytes, b.CreatedAt)
+	_, e := s.DB.ExecContext(ctx, "INSERT INTO backups(id,project_id,job_id,object_key,manifest,size_bytes,created_at,storage_target) VALUES (?,?,?,?,?,?,?,?)", b.ID, b.ProjectID, b.JobID, b.ObjectKey, b.Manifest, b.SizeBytes, b.CreatedAt, b.StorageTarget)
 	return e
 }
 
 func (s *Store) ProjectBackups(ctx context.Context, projectID string, limit int) ([]Backup, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT id,COALESCE(project_id,''),job_id,object_key,manifest,size_bytes,created_at FROM backups WHERE project_id=? ORDER BY created_at DESC LIMIT ?", projectID, limit)
+	rows, e := s.DB.QueryContext(ctx, "SELECT id,COALESCE(project_id,''),job_id,object_key,manifest,size_bytes,created_at,storage_target FROM backups WHERE project_id=? ORDER BY created_at DESC LIMIT ?", projectID, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -304,7 +305,7 @@ func (s *Store) ProjectBackups(ctx context.Context, projectID string, limit int)
 	out := []Backup{}
 	for rows.Next() {
 		var b Backup
-		if e := rows.Scan(&b.ID, &b.ProjectID, &b.JobID, &b.ObjectKey, &b.Manifest, &b.SizeBytes, &b.CreatedAt); e != nil {
+		if e := rows.Scan(&b.ID, &b.ProjectID, &b.JobID, &b.ObjectKey, &b.Manifest, &b.SizeBytes, &b.CreatedAt, &b.StorageTarget); e != nil {
 			return nil, e
 		}
 		out = append(out, b)

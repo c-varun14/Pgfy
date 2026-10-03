@@ -370,30 +370,29 @@ func (w *Worker) runBackup(ctx context.Context, job store.Job) (BackupResult, *s
 
 	now := w.now().UTC().Truncate(time.Second)
 	base := client.BackupKey(project.DBName, now)
-	settings, e := w.StorageSettings(ctx)
-	if e != nil {
-		return result, nil, e
-	}
 	// Recorded before anything is uploaded: cleanup later needs proof that an
 	// abandoned archive in this bucket is ours.
-	if e := w.Store.SetJobTarget(ctx, job.ID, settings.Target(), base); e != nil {
+	if e := w.Store.SetJobTarget(ctx, job.ID, client.Target(), base); e != nil {
 		return result, nil, e
 	}
 	manifest := storage.Manifest{Version: 1, InstallationID: w.InstallationID, ProjectID: project.ID, ProjectName: project.Name, DBName: project.DBName,
 		PostgresVersion: version, CreatedAt: now, ArchiveKey: base + "/" + storage.ArchiveFile, ManifestKey: base + "/" + storage.ManifestFile,
 		SHA256: sum, SizeBytes: n, Tables: tables, TablesTruncated: truncated, Objects: &objects}
+	encoded, e := storage.EncodeManifest(manifest)
+	if e != nil {
+		return result, nil, e
+	}
 	w.stage(ctx, job, "upload_archive")
 	if e := client.UploadFile(ctx, manifest.ArchiveKey, archive); e != nil {
 		return result, nil, e
 	}
 	w.stage(ctx, job, "upload_manifest")
-	encoded, _ := json.MarshalIndent(manifest, "", " ")
 	if e := client.UploadBytes(ctx, manifest.ManifestKey, encoded, "application/json"); e != nil {
 		return result, nil, e
 	}
 	result.BackupID = "bk_" + security.Token()[:16]
 	result.ObjectKey = manifest.ManifestKey
-	record := store.Backup{ID: result.BackupID, ProjectID: project.ID, JobID: job.ID, ObjectKey: result.ObjectKey, Manifest: string(encoded), SizeBytes: n, CreatedAt: now.Unix()}
+	record := store.Backup{ID: result.BackupID, ProjectID: project.ID, JobID: job.ID, StorageTarget: client.Target(), ObjectKey: result.ObjectKey, Manifest: string(encoded), SizeBytes: n, CreatedAt: now.Unix()}
 	return result, &record, nil
 }
 
@@ -746,11 +745,13 @@ func readToolErrors(r io.Reader) toolRun {
 	run := toolRun{Counted: "counted from the output"}
 	var excerpt strings.Builder
 	limited := &limitedWriter{b: &excerpt, limit: 4096}
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	reader := bufio.NewReaderSize(r, 64*1024)
 	summary := regexp.MustCompile(`errors ignored on restore: (\d+)`)
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, e := readBoundedLine(reader, 1<<20)
+		if e != nil && line == "" {
+			break
+		}
 		if strings.TrimSpace(line) != "" {
 			run.LastLine = line
 		}
@@ -763,12 +764,32 @@ func readToolErrors(r io.Reader) toolRun {
 			}
 		}
 		_, _ = limited.Write([]byte(line + "\n"))
+		if e != nil {
+			break
+		}
 	}
 	run.Excerpt = strings.TrimSpace(excerpt.String())
 	if len(run.LastLine) > 300 {
 		run.LastLine = run.LastLine[:300]
 	}
 	return run
+}
+
+// readBoundedLine returns the next line without its newline, keeping at most
+// limit bytes of it. The rest of an overlong line is read and discarded rather
+// than left in the pipe: a tool blocked writing stderr would never exit.
+func readBoundedLine(r *bufio.Reader, limit int) (string, error) {
+	var line []byte
+	for {
+		chunk, e := r.ReadSlice('\n')
+		if room := limit - len(line); room > 0 {
+			line = append(line, chunk[:min(len(chunk), room)]...)
+		}
+		if e == bufio.ErrBufferFull {
+			continue
+		}
+		return strings.TrimRight(string(line), "\r\n"), e
+	}
 }
 
 type limitedWriter struct {

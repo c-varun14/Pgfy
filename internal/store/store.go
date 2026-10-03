@@ -186,12 +186,29 @@ func (s *Store) Password(ctx context.Context, email string) (string, error) {
 	e := s.DB.QueryRowContext(ctx, "SELECT password_hash FROM administrator WHERE email=?", email).Scan(&hash)
 	return hash, e
 }
-func (s *Store) AddSession(ctx context.Context, token, scope string, now time.Time) error {
+
+// ErrCredentialsChanged means the password step no longer describes the
+// administrator: a reset or an enrolment committed while it was being checked.
+var ErrCredentialsChanged = errors.New("administrator credentials changed during sign-in")
+
+// AddSession opens a password-only session. It is bound to the password hash
+// the caller verified and to the absence of a second factor, both re-read in
+// the transaction that inserts it, so a reset committing mid-sign-in cannot be
+// followed by a session for the old password.
+func (s *Store) AddSession(ctx context.Context, token, scope, passwordHash string, now time.Time) error {
 	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
+	var current string
+	var secret sql.NullString
+	if e = tx.QueryRowContext(ctx, "SELECT password_hash, totp_secret_sealed FROM administrator WHERE id=1").Scan(&current, &secret); e != nil {
+		return e
+	}
+	if current != passwordHash || secret.Valid && secret.String != "" {
+		return ErrCredentialsChanged
+	}
 	if _, e = tx.ExecContext(ctx, "DELETE FROM sessions WHERE expires_at<=? OR scope<>?", now.Unix(), scope); e != nil {
 		return e
 	}

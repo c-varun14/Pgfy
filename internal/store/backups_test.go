@@ -223,7 +223,7 @@ func TestReplacePrefixReconcilesHistoryAndDeletionIntent(t *testing.T) {
 	p := ready(t, s, "aaa000000001", now)
 	key := "pgfy/backups/" + p.DBName + "/20231114T221320Z/manifest.json"
 	archive := "pgfy/backups/" + p.DBName + "/20231114T221320Z/archive.dump"
-	if e := s.RecordBackup(ctx, Backup{ID: "bk_1", ProjectID: p.ID, JobID: "job_1", ObjectKey: key, Manifest: "{}", CreatedAt: now.Unix()}); e != nil {
+	if e := s.RecordBackup(ctx, Backup{ID: "bk_1", ProjectID: p.ID, JobID: "job_1", StorageTarget: "target", ObjectKey: key, Manifest: "{}", CreatedAt: now.Unix()}); e != nil {
 		t.Fatal(e)
 	}
 	entry := BucketBackup{ManifestKey: key, ArchiveKey: archive, DBName: p.DBName, TakenAt: now.Unix(), State: BackupComplete, InstallationID: "install", ProjectID: p.ID}
@@ -267,6 +267,65 @@ func TestReplacePrefixReconcilesHistoryAndDeletionIntent(t *testing.T) {
 	}
 }
 
+func TestBackupHistoryIsScopedToStorageTarget(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	p := ready(t, s, "aaa000000001", now)
+	for _, target := range []string{"bucket-a", "bucket-b", ""} {
+		b := Backup{ID: "bk_" + target, ProjectID: p.ID, JobID: "job_" + target, StorageTarget: target, ObjectKey: "key_" + target, Manifest: "{}", CreatedAt: now.Unix()}
+		var e error
+		if target == "bucket-b" {
+			_, e = s.EnqueueJob(ctx, b.JobID, "backup", p.ID, "{}", now)
+			if e != nil {
+				t.Fatal(e)
+			}
+			e = s.CompleteBackupJob(ctx, b.JobID, p.ID, "succeeded", "done", "", "{}", &b, false, now, 24*time.Hour)
+		} else {
+			e = s.RecordBackup(ctx, b)
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	// Provenance survives pruning the job that produced the backup.
+	if n, e := s.PruneJobs(ctx, now.Add(time.Second)); e != nil || n != 1 {
+		t.Fatal(n, e)
+	}
+	backups, e := s.ProjectBackups(ctx, p.ID, 10)
+	if e != nil || len(backups) != 3 {
+		t.Fatal(backups, e)
+	}
+	for _, b := range backups {
+		if b.ID != "bk_"+b.StorageTarget {
+			t.Fatal("target was not persisted", b)
+		}
+	}
+	// Deleting an object in B cannot retire A's history, even for the same key.
+	if e := s.DeleteLocalBackupRow(ctx, "bucket-b", "key_bucket-a"); e != nil {
+		t.Fatal(e)
+	}
+	if n, e := s.ForgetLostLocalBackups(ctx, "bucket-b"); e != nil || n != 1 {
+		t.Fatal(n, e)
+	}
+	backups, e = s.ProjectBackups(ctx, p.ID, 10)
+	if e != nil || len(backups) != 2 {
+		t.Fatal("reconciling B erased other history", backups, e)
+	}
+	for _, b := range backups {
+		if b.StorageTarget == "bucket-b" {
+			t.Fatal("B's lost backup survived", b)
+		}
+	}
+	if n, e := s.ForgetLostLocalBackups(ctx, "bucket-a"); e != nil || n != 1 {
+		t.Fatal(n, e)
+	}
+	backups, e = s.ProjectBackups(ctx, p.ID, 10)
+	if e != nil || len(backups) != 1 || backups[0].StorageTarget != "" {
+		t.Fatal("history without proven provenance was retired", backups, e)
+	}
+}
+
 // Pruning keeps history bounded but never discards provenance that cleanup
 // still needs, and never for a store it has not completely reconciled.
 func TestPruneJobsKeepsLiveProvenance(t *testing.T) {
@@ -301,6 +360,14 @@ func TestPruneJobsKeepsLiveProvenance(t *testing.T) {
 	// Nothing is pruned while the store has no complete reconciliation.
 	if n, e := s.PruneJobs(ctx, now.Add(-90*24*time.Hour)); e != nil || n != 0 {
 		t.Fatal("provenance was pruned for an unreconciled store", n, e)
+	}
+	// A reconciliation from before the jobs finished cannot have seen what
+	// they left behind, so it proves nothing about their directories.
+	if e := s.SetTargetReconciled(ctx, "target", old.Add(-time.Hour), ""); e != nil {
+		t.Fatal(e)
+	}
+	if n, e := s.PruneJobs(ctx, now.Add(-90*24*time.Hour)); e != nil || n != 0 {
+		t.Fatal("provenance was pruned on a reconciliation older than the job", n, e)
 	}
 	if e := s.SetTargetReconciled(ctx, "target", now, ""); e != nil {
 		t.Fatal(e)

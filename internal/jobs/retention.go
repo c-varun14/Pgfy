@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/c-varun14/Pgfy/internal/storage"
@@ -33,7 +34,7 @@ func (w *Worker) Reconcile(ctx context.Context) {
 	if e != nil {
 		return
 	}
-	client, e := w.StorageClient(ctx)
+	client, e := storage.New(settings)
 	if e != nil {
 		slog.Error("backup storage is unusable", "reason", e.Error())
 		return
@@ -284,6 +285,22 @@ func selectExpired(backups []store.BucketBackup, policy store.BackupPolicy, now 
 // part-way can be finished later, the manifest goes before the archive so a
 // half-deleted backup is never offered, and the local row goes last.
 func (w *Worker) deleteBackup(ctx context.Context, client objectStore, target string, b store.BucketBackup) error {
+	// Ownership was cached when the key was first seen, and an object can be
+	// replaced at the same key since. The manifest is read again right before
+	// anything is removed; a disagreement drops the cached row so the next
+	// reconciliation reads the manifest afresh.
+	m, e := client.Manifest(ctx, b.ManifestKey)
+	if e != nil {
+		return e
+	}
+	directory := strings.TrimSuffix(b.ManifestKey, "/"+storage.ManifestFile)
+	entry := storage.Entry{Directory: directory, ManifestKey: b.ManifestKey, ArchiveKey: b.ArchiveKey}
+	if storage.CheckManifest(m, entry) != nil || m.InstallationID != w.InstallationID || m.ProjectID != b.ProjectID {
+		if e := w.Store.ForgetBucketBackup(ctx, target, b.ManifestKey); e != nil {
+			return e
+		}
+		return fmt.Errorf("backup %s changed since it was recorded; it will be read again", directory)
+	}
 	if e := w.Store.MarkBackupDeleting(ctx, target, b.ManifestKey, w.now()); e != nil {
 		return e
 	}
@@ -303,7 +320,7 @@ func (w *Worker) finishDelete(ctx context.Context, client objectStore, target st
 	if e := w.Store.ForgetBucketBackup(ctx, target, b.ManifestKey); e != nil {
 		return e
 	}
-	return w.Store.DeleteLocalBackupRow(ctx, b.ManifestKey)
+	return w.Store.DeleteLocalBackupRow(ctx, target, b.ManifestKey)
 }
 
 // cleanAbandonedUploads removes the archive of an interrupted backup of ours,

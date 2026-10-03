@@ -7,11 +7,16 @@ import { Field } from "../../components/ui/field";
 import { useToast } from "../../components/ui/toast";
 
 export const EMPTY_STORAGE: StorageSettings = { endpoint: "https://s3.us-east-1.amazonaws.com", region: "us-east-1", bucket: "", prefix: "pgfy", access_key: "", secret_key: "", session_token: "", path_style: false, private_endpoint: false, bucket_protection: "versioning" };
+/** An unconfigured server reports no protection choice; the form shows, and so must submit, the default. */
+function formFrom(settings?: StorageSettings): StorageSettings {
+  const form = { ...EMPTY_STORAGE, ...settings };
+  return { ...form, bucket_protection: form.bucket_protection || EMPTY_STORAGE.bucket_protection };
+}
 export function StorageForm({ initial, configured, onSaved }: { initial?: StorageSettings; configured: boolean; onSaved: (settings: StorageSettings) => void }) {
-  const [form, setForm] = useState<StorageSettings>({ ...EMPTY_STORAGE, ...initial }); const [advanced, setAdvanced] = useState(false); const [busy, setBusy] = useState<"save" | "check" | "">(""); const [error, setError] = useState(""); const [steps, setSteps] = useState<CheckStep[] | null>(null); const { showToast } = useToast();
-  useEffect(() => { setForm({ ...EMPTY_STORAGE, ...initial }); setAdvanced(!!initial && (initial.path_style || initial.private_endpoint || !!initial.session_token || !initial.endpoint.includes("amazonaws.com"))); }, [initial]);
+  const [form, setForm] = useState<StorageSettings>(formFrom(initial)); const [advanced, setAdvanced] = useState(false); const [busy, setBusy] = useState<"save" | "check" | "">(""); const [error, setError] = useState(""); const [steps, setSteps] = useState<CheckStep[] | null>(null); const { showToast } = useToast();
+  useEffect(() => { setForm(formFrom(initial)); setAdvanced(!!initial && (initial.path_style || initial.private_endpoint || !!initial.session_token || !initial.endpoint.includes("amazonaws.com"))); }, [initial]);
   function set<K extends keyof StorageSettings>(key: K, value: StorageSettings[K]) { setForm((current) => ({ ...current, [key]: value })); }
-  async function save(event: FormEvent) { event.preventDefault(); setBusy("save"); setError(""); setSteps(null); try { const body = await api<{ configured: boolean; settings: StorageSettings }>("/settings/storage", { method: "PUT", body: JSON.stringify(form) }); setForm({ ...EMPTY_STORAGE, ...body.settings }); onSaved(body.settings); showToast("Backup storage saved"); } catch (failure) { setError((failure as Error).message); } finally { setBusy(""); } }
+  async function save(event: FormEvent) { event.preventDefault(); setBusy("save"); setError(""); setSteps(null); try { const body = await api<{ configured: boolean; settings: StorageSettings }>("/settings/storage", { method: "PUT", body: JSON.stringify(form) }); setForm(formFrom(body.settings)); onSaved(body.settings); showToast("Backup storage saved"); } catch (failure) { setError((failure as Error).message); } finally { setBusy(""); } }
   async function check() { setBusy("check"); setError(""); try { setSteps((await api<{ ok: boolean; steps: CheckStep[] }>("/settings/storage/check", { method: "POST", body: "{}" })).steps); } catch (failure) { setError((failure as Error).message); } finally { setBusy(""); } }
   return <form className="storage-form" onSubmit={(event) => void save(event)}>
     <Field label="Bucket" htmlFor="bucket"><input id="bucket" value={form.bucket} onChange={(event) => set("bucket", event.target.value)} placeholder="my-backups" required /></Field>

@@ -275,6 +275,41 @@ func TestRetentionFailsClosedOnForeignOrDamagedContent(t *testing.T) {
 	}
 }
 
+// Ownership cached on an earlier pass is not proof: a manifest replaced at the
+// same key by another installation is read again before anything is deleted.
+func TestReplacedManifestIsNotDeletedOnCachedOwnership(t *testing.T) {
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	w, s := testWorker(t, now)
+	ctx := context.Background()
+	fake := newFakeStore()
+	fake.put("app_shop", "20260301T000000Z", manifestFor("prj_shop", "Shop"))
+	fake.put("app_shop", "20260101T000000Z", manifestFor("prj_shop", "Shop"))
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 30, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
+		t.Fatal(e)
+	}
+	if e := w.reconcile(ctx, fake, testSettings()); e != nil {
+		t.Fatal(e)
+	}
+	foreign := manifestFor("prj_other", "Other")
+	foreign.InstallationID = "install-b"
+	fake.put("app_shop", "20260101T000000Z", foreign)
+	if e := s.SetBackupPolicy(ctx, store.BackupPolicy{TargetIntervalHours: 24, RetentionDaily: 1, RetentionWeekly: 0, PreferredHour: -1}, now); e != nil {
+		t.Fatal(e)
+	}
+	for i := 0; i < 2; i++ {
+		if e := w.reconcile(ctx, fake, testSettings()); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if len(fake.removed) != 0 {
+		t.Fatal("a backup now belonging to another installation was deleted", fake.removed)
+	}
+	prefixes, _ := s.PrefixStates(ctx, testSettings().Target())
+	if len(prefixes) != 1 || !prefixes[0].Mixed {
+		t.Fatal("the replaced manifest was not read again", prefixes)
+	}
+}
+
 // Nothing is deleted when the bucket cannot be shown to be protected.
 func TestRetentionRequiresProtection(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
