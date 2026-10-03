@@ -499,8 +499,8 @@ func (s *Store) ForgetBucketBackup(ctx context.Context, target, manifestKey stri
 
 // DeleteLocalBackupRow drops the history row for an object that no longer
 // exists, so "newest recoverable backup" follows the bucket and not our history.
-func (s *Store) DeleteLocalBackupRow(ctx context.Context, objectKey string) error {
-	_, e := s.DB.ExecContext(ctx, "DELETE FROM backups WHERE object_key=?", objectKey)
+func (s *Store) DeleteLocalBackupRow(ctx context.Context, target, objectKey string) error {
+	_, e := s.DB.ExecContext(ctx, "DELETE FROM backups WHERE storage_target=? AND object_key=?", target, objectKey)
 	return e
 }
 
@@ -508,8 +508,8 @@ func (s *Store) DeleteLocalBackupRow(ctx context.Context, objectKey string) erro
 // store, so the newest recoverable backup is the bucket's answer and not ours.
 // It runs only after a complete reconciliation of that store.
 func (s *Store) ForgetLostLocalBackups(ctx context.Context, target string) (int64, error) {
-	res, e := s.DB.ExecContext(ctx, `DELETE FROM backups WHERE NOT EXISTS (
-		SELECT 1 FROM bucket_backups b WHERE b.storage_target=? AND b.manifest_key=backups.object_key AND b.state='complete')`, target)
+	res, e := s.DB.ExecContext(ctx, `DELETE FROM backups WHERE storage_target=? AND NOT EXISTS (
+		SELECT 1 FROM bucket_backups b WHERE b.storage_target=backups.storage_target AND b.manifest_key=backups.object_key AND b.state='complete')`, target)
 	if e != nil {
 		return 0, e
 	}
@@ -528,12 +528,13 @@ func (s *Store) AbandonedUploadKey(ctx context.Context, target, key string, befo
 
 // PruneJobs keeps job history bounded, but never at the cost of provenance: a
 // row is kept while its directory may still need cleaning, and while the store
-// it belongs to has no complete reconciliation proving the archive is gone.
+// it belongs to has no complete reconciliation since the job finished. An
+// older one cannot have seen what the job left behind.
 func (s *Store) PruneJobs(ctx context.Context, before time.Time) (int64, error) {
 	res, e := s.DB.ExecContext(ctx, `DELETE FROM jobs WHERE finished_at>0 AND finished_at<?
 		AND NOT EXISTS (SELECT 1 FROM bucket_backups b WHERE b.storage_target=jobs.target_storage AND b.state='archive_only'
 		                 AND jobs.target_key<>'' AND b.manifest_key LIKE jobs.target_key || '%')
-		AND (jobs.target_key='' OR EXISTS (SELECT 1 FROM bucket_targets t WHERE t.storage_target=jobs.target_storage AND t.reconciled_at>0))`,
+		AND (jobs.target_key='' OR EXISTS (SELECT 1 FROM bucket_targets t WHERE t.storage_target=jobs.target_storage AND t.reconciled_at>jobs.finished_at))`,
 		before.Unix())
 	if e != nil {
 		return 0, e

@@ -305,6 +305,9 @@ func (s *Store) ConfirmEnrolment(ctx context.Context, enrolHash, sessionHash, sc
 		}
 		return "", commitThen(tx, ErrToken)
 	}
+	if c.Scope != "" && c.Scope != scope {
+		return stale() // the access mode, origin or generation changed since enrolment began
+	}
 	switch c.Kind {
 	case "setup":
 		if parentPurpose != "setup" || exists {
@@ -359,9 +362,6 @@ func (s *Store) ConfirmEnrolment(ctx context.Context, enrolHash, sessionHash, sc
 		}
 	default:
 		return stale()
-	}
-	if c.Scope != "" && c.Scope != scope {
-		return stale() // the access mode or origin changed since the enrolment began
 	}
 	action, event, summary := "auth.second_factor", "second_factor_enrolled", "A second factor was enrolled for the administrator"
 	if c.Kind == "reset" {

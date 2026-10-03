@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -65,7 +66,10 @@ func (s *Server) putStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Backups are only as safe as the bucket holding them, so the bucket is
 	// asked about its own protection before these settings are accepted.
-	state, e := s.checkProtection(r, in)
+	ctx, cancel := contextWithTimeout(r, 30*time.Second)
+	defer cancel()
+	r = r.WithContext(ctx)
+	state, e := s.checkProtection(ctx, in)
 	if e != nil {
 		failure(w, 400, "invalid_storage", e.Error())
 		return
@@ -83,13 +87,11 @@ func (s *Server) putStorage(w http.ResponseWriter, r *http.Request) {
 // checkProtection refuses a bucket whose provider says versioning is off,
 // whichever protection the operator chose: an acknowledgment is for providers
 // that cannot answer, not a way past an answer nobody likes.
-func (s *Server) checkProtection(r *http.Request, in storage.Settings) (string, error) {
+func (s *Server) checkProtection(ctx context.Context, in storage.Settings) (string, error) {
 	client, e := storage.New(in)
 	if e != nil {
 		return "", e
 	}
-	ctx, cancel := contextWithTimeout(r, 30*time.Second)
-	defer cancel()
 	state, e := client.Protection(ctx)
 	if e != nil {
 		return "", e

@@ -143,6 +143,9 @@ func New(s Settings) (*Client, error) {
 	return &Client{settings: s, mc: mc}, nil
 }
 
+// Target identifies the settings snapshot this client uses for every operation.
+func (c *Client) Target() string { return c.settings.Target() }
+
 func (c *Client) key(parts ...string) string {
 	return path.Join(append([]string{strings.Trim(c.settings.Prefix, "/")}, parts...)...)
 }
@@ -352,6 +355,10 @@ type TableCount struct {
 	Rows   int64  `json:"rows"`
 }
 
+// MaxManifestBytes accommodates 5000 pairs of 63-byte identifiers even when every
+// byte needs a six-byte JSON escape, plus formatting and the other metadata.
+const MaxManifestBytes = 8 << 20
+
 // Manifest is published last; a backup without one is incomplete and ignored.
 type Manifest struct {
 	Version         int           `json:"version"`
@@ -370,6 +377,18 @@ type Manifest struct {
 	ManifestKey     string        `json:"manifest_key,omitempty"`
 }
 
+// EncodeManifest bounds publication by the same limit used when reading it.
+func EncodeManifest(m Manifest) ([]byte, error) {
+	b, e := json.MarshalIndent(m, "", " ")
+	if e != nil {
+		return nil, e
+	}
+	if len(b) > MaxManifestBytes {
+		return nil, errors.New("the manifest exceeds the size limit for this release")
+	}
+	return b, nil
+}
+
 // Manifest reads and fully validates one manifest. The restore path uses the
 // same layout rules as listing and retention, so a manifest that contradicts
 // where it lives can never be restored.
@@ -379,9 +398,12 @@ func (c *Client) Manifest(ctx context.Context, key string) (Manifest, error) {
 	if e != nil {
 		return m, e
 	}
-	b, e := c.ReadBytes(ctx, key, 1<<20)
+	b, e := c.ReadBytes(ctx, key, MaxManifestBytes+1)
 	if e != nil {
 		return m, e
+	}
+	if len(b) > MaxManifestBytes {
+		return m, errors.New("the manifest exceeds the size limit for this release")
 	}
 	if e := json.Unmarshal(b, &m); e != nil {
 		return m, errors.New("the manifest is unreadable or from an unsupported version")

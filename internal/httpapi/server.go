@@ -386,7 +386,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := security.Token()
-	if e = s.Store.AddSession(r.Context(), token, s.scope(), s.Now()); e != nil {
+	if e = s.Store.AddSession(r.Context(), token, s.scope(), current, s.Now()); errors.Is(e, store.ErrCredentialsChanged) {
+		failure(w, 401, "invalid_credentials", "Email or password is incorrect.")
+		return
+	} else if e != nil {
 		failure(w, 503, "metadata_unavailable", "Session could not be saved.")
 		return
 	}

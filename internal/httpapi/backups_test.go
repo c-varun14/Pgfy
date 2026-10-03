@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,45 @@ import (
 	"github.com/c-varun14/Pgfy/internal/storage"
 	"github.com/c-varun14/Pgfy/internal/store"
 )
+
+func TestStorageSettingsPersistAfterOriginalRequestContextExpires(t *testing.T) {
+	f := newFixture(t)
+	cookie, csrf := f.setup(t)
+	f.withStorage(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = context.WithValue(ctx, baseContextKey{}, context.Background())
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !r.URL.Query().Has("versioning") {
+			t.Error("expected the bucket protection check", r.URL)
+		}
+		// The middleware's shorter timeout expires while S3 is answering.
+		cancel()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`))
+	}))
+	defer provider.Close()
+	settings := storage.Settings{Endpoint: provider.URL, Region: "us-east-1", Bucket: "backups", Prefix: "pgfy", AccessKey: "key", SecretKey: "secret", PrivateEndpoint: true, PathStyle: true, BucketProtection: storage.ProtectionVersioning}
+	body, e := json.Marshal(settings)
+	if e != nil {
+		t.Fatal(e)
+	}
+	req := httptest.NewRequest("PUT", "/api/v1/settings/storage", strings.NewReader(string(body))).WithContext(ctx)
+	req.AddCookie(cookie)
+	req.Header.Set("X-CSRF-Token", csrf)
+	out := httptest.NewRecorder()
+	f.s.putStorage(out, req)
+	if ctx.Err() == nil {
+		t.Fatal("the original request context did not expire")
+	}
+	if out.Code != 200 {
+		t.Fatal("protection succeeded but persistence failed", out.Code, out.Body.String())
+	}
+	saved, e := f.s.Jobs.StorageSettings(context.Background())
+	if e != nil || saved.Endpoint != settings.Endpoint || saved.ProtectionState != storage.VersioningEnabled || saved.ProtectionCheckedAt != f.now.Unix() {
+		t.Fatal("the checked settings were not persisted", saved, e)
+	}
+}
 
 // withStorage gives the fixture a worker and a configured store without
 // contacting anything: the API reads the reconciled view from SQLite.

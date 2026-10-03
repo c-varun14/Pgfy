@@ -3,10 +3,16 @@ package alerts
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -326,5 +332,63 @@ func TestRemovedSourcesResolveTheirConditions(t *testing.T) {
 	f.tick(11 * time.Minute)
 	if got := f.sink.states("connections_global"); len(got) != 2 || got[1] != "resolved" {
 		t.Fatal("a condition whose source no longer exists stayed active", got)
+	}
+}
+
+// A fresh report is not a successful measurement: a disk that could not be
+// measured, an unknown clock state, or certificate files that cannot be read
+// leave their conditions as they were instead of resolving them.
+func TestUnmeasuredHostSourcesResolveNothing(t *testing.T) {
+	f := newFixture(t)
+	f.engine.Mode = "https"
+	write := func(path string, v any) {
+		body, _ := json.Marshal(v)
+		if e := os.WriteFile(path, body, 0644); e != nil {
+			t.Fatal(e)
+		}
+	}
+	report := func(disk map[string]any, ntp any) {
+		write(f.host.Status, map[string]any{"version": 1, "written_at": f.now.Format(time.RFC3339),
+			"disks": []map[string]any{disk}, "ntp": map[string]any{"synchronized": ntp}})
+	}
+	tick := func(d time.Duration, disk map[string]any, ntp any) {
+		f.now = f.now.Add(d)
+		report(disk, ntp)
+		f.engine.Tick(context.Background())
+	}
+	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if e != nil {
+		t.Fatal(e)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: f.now.Add(-time.Hour), NotAfter: f.now.Add(3 * 24 * time.Hour)}
+	der, e := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(f.host.Certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644); e != nil {
+		t.Fatal(e)
+	}
+	write(f.host.TLSState, map[string]any{"state": "trusted", "issuer": "Test CA"})
+	write(f.host.CertSync, map[string]any{"at": f.now.Format(time.RFC3339), "ok": false, "message": "postgres refused the certificate"})
+	low := map[string]any{"name": "root", "total_bytes": 100, "free_bytes": 5}
+	tick(0, low, false)
+	keys := []string{"disk_low:root", "ntp_unsynchronised", "certificate_expiring", "certificate_sync_failed"}
+	for _, k := range keys {
+		if got := f.sink.states(k); len(got) != 1 || got[0] != "firing" {
+			t.Fatal("condition did not fire", k, got)
+		}
+	}
+	// Every source is now present but unmeasured.
+	os.Remove(f.host.Certificate)
+	os.Remove(f.host.TLSState)
+	os.Remove(f.host.CertSync)
+	broken := map[string]any{"name": "root", "error": "statvfs failed"}
+	tick(time.Minute, broken, nil)
+	tick(11*time.Minute, broken, nil)
+	tick(11*time.Minute, broken, nil)
+	for _, k := range keys {
+		if got := f.sink.states(k); len(got) != 1 {
+			t.Fatal("an unmeasured source resolved its condition", k, got)
+		}
 	}
 }

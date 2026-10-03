@@ -1,5 +1,5 @@
 import { Archive, ChevronDown, Database, RotateCcw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type BucketBackup, type DatabaseBackups, type Discovery, type Manifest, type Project, type StorageSettings } from "../api";
 import { formatBytes, formatDate, formatDateTime, relativeTime, STAGE_LABELS } from "../lib/format";
 import { PageHeader } from "../components/PageHeader";
@@ -19,9 +19,11 @@ type Group = { key: string; name: string; dbName: string; project: Project | nul
 
 /** A discovered folder belongs to a local database only when the installation,
  *  the project and the database name all agree; anything else stays separate. */
+/** Identity comes from complete backups. A folder holding only incomplete or unreadable ones has none, so its generated name is all that ties it to a project. */
 function matches(discovered: DatabaseBackups, project: Project, installationID?: string) {
-  return discovered.db_name === project.db_name && !discovered.mixed && discovered.project_id === project.id &&
-    (!discovered.installation_id || discovered.installation_id === installationID);
+  if (discovered.db_name !== project.db_name || discovered.mixed) return false;
+  if (!discovered.project_id) return !discovered.count;
+  return discovered.project_id === project.id && (!discovered.installation_id || discovered.installation_id === installationID);
 }
 
 function buildGroups(projects: Project[] | null, discovery: Discovery | null): { local: Group[]; foreign: Group[] } {
@@ -39,7 +41,7 @@ function buildGroups(projects: Project[] | null, discovery: Discovery | null): {
     local.push(toGroup(project.id, project.name, project.db_name, project, false, discovered));
   });
   discovery?.databases.forEach((item) => {
-    if (claimed.has(item.db_name) || item.count === 0) return;
+    if (claimed.has(item.db_name) || (!item.count && !item.manifest_only && !item.damaged)) return;
     foreign.push(toGroup(item.db_name, item.project_name || item.db_name, item.db_name, null, true, item));
   });
   const latestFirst = (a: Group, b: Group) => (b.latest?.taken_at || 0) - (a.latest?.taken_at || 0) || a.name.localeCompare(b.name);
@@ -57,10 +59,24 @@ export function BackupsPage({ navigate }: { navigate: (to: string) => void }) {
   const [policy, setPolicy] = useState<{ target_interval_hours: number } | null>(null);
   const [error, setError] = useState(""); const [editing, setEditing] = useState(false); const [selected, setSelected] = useState<Manifest | null>(null); const [expanded, setExpanded] = useState<string | null>(null);
   const [running, setRunning] = useState<Map<string, number>>(new Map()); const [cardErrors, setCardErrors] = useState<Map<string, string>>(new Map()); const { showToast } = useToast();
+  const [loadingPages, setLoadingPages] = useState<Set<string>>(new Set());
+  const storageTarget = useRef("");
   async function load() {
     const results = await Promise.allSettled([api<{ configured: boolean; settings: StorageSettings }>("/settings/storage"), api<Discovery>("/recovery/backups"), api<{ projects: Project[] }>("/projects"), api<{ target_interval_hours: number }>("/settings/backups")]);
+    const settings = results[0].status === "fulfilled" ? results[0].value.settings : null;
+    const target = settings ? JSON.stringify([settings.endpoint.toLowerCase(), settings.bucket, settings.prefix.replace(/^\/+|\/+$/g, "")]) : "";
+    const sameTarget = target !== "" && storageTarget.current === target;
+    storageTarget.current = target;
     if (results[0].status === "fulfilled") setStorage(results[0].value); else { setStorage({ configured: false, settings: EMPTY_STORAGE }); setError(results[0].reason instanceof Error ? results[0].reason.message : "Backup storage is unavailable."); }
-    if (results[1].status === "fulfilled") setDiscovery(results[1].value); else { setDiscovery({ state: "ok", storage_error: results[1].reason instanceof Error ? results[1].reason.message : "Backups could not be listed.", databases: [] }); if (results[0].status === "fulfilled") setError(results[1].reason instanceof Error ? results[1].reason.message : "Backups could not be listed."); }
+    if (results[1].status === "fulfilled") {
+      const fresh = results[1].value;
+      // Keep loaded pages through job polling while the bucket view is unchanged.
+      setDiscovery((current) => ({ ...fresh, databases: fresh.databases.map((group) => {
+        const previous = sameTarget && current?.databases.find((item) => item.db_name === group.db_name);
+        if (!previous || previous.reconciled_at !== group.reconciled_at || previous.count !== group.count || previous.newest_at !== group.newest_at || previous.backups.length <= group.backups.length) return group;
+        return { ...group, backups: previous.backups, has_more: previous.has_more, total_bytes: previous.total_bytes };
+      }) }));
+    } else { setDiscovery({ state: "ok", storage_error: results[1].reason instanceof Error ? results[1].reason.message : "Backups could not be listed.", databases: [] }); if (results[0].status === "fulfilled") setError(results[1].reason instanceof Error ? results[1].reason.message : "Backups could not be listed."); }
     if (results[2].status === "fulfilled") setProjects(results[2].value.projects); else setProjects((current) => current || []);
     if (results[3].status === "fulfilled") setPolicy(results[3].value);
   }
@@ -79,6 +95,31 @@ export function BackupsPage({ navigate }: { navigate: (to: string) => void }) {
     setCardErrors((current) => { const next = new Map(current); next.delete(project.id); return next; });
     try { await api(`/projects/${project.id}/backups`, { method: "POST", body: "{}" }); setRunning((current) => new Map(current).set(project.id, Math.floor(Date.now() / 1000) - 5)); showToast(`Backing up ${project.name}`); await load(); }
     catch (failure) { setCardErrors((current) => new Map(current).set(project.id, (failure as Error).message)); }
+  }
+
+  async function loadOlder(group: Group) {
+    const oldest = group.backups.at(-1);
+    if (!oldest || loadingPages.has(group.dbName)) return;
+    const target = storageTarget.current;
+    const before = new Date(oldest.taken_at * 1000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    setLoadingPages((current) => new Set(current).add(group.dbName));
+    setCardErrors((current) => { const next = new Map(current); next.delete(group.key); return next; });
+    try {
+      const page = await api<{ backups: BucketBackup[]; has_more: boolean }>(`/recovery/backups?db=${encodeURIComponent(group.dbName)}&before=${encodeURIComponent(before)}`);
+      setDiscovery((current) => {
+        if (!current || storageTarget.current !== target) return current;
+        return { ...current, databases: current.databases.map((item) => {
+          if (item.db_name !== group.dbName || item.backups.at(-1)?.manifest_key !== oldest.manifest_key || item.reconciled_at !== group.discovered?.reconciled_at) return item;
+          const seen = new Set(item.backups.map((backup) => backup.manifest_key));
+          const backups = [...item.backups, ...page.backups.filter((backup) => !seen.has(backup.manifest_key))];
+          return { ...item, backups, has_more: page.has_more, total_bytes: backups.reduce((sum, backup) => sum + backup.size_bytes, 0) };
+        }) };
+      });
+    } catch (failure) {
+      if (storageTarget.current === target) setCardErrors((current) => new Map(current).set(group.key, (failure as Error).message));
+    } finally {
+      setLoadingPages((current) => { const next = new Set(current); next.delete(group.dbName); return next; });
+    }
   }
 
   const groups = useMemo(() => buildGroups(projects, discovery), [projects, discovery]);
@@ -115,7 +156,7 @@ export function BackupsPage({ navigate }: { navigate: (to: string) => void }) {
       </summary>
       {cardError && <p className="field-error" role="alert">{cardError}</p>}
       {group.backups.length > 0 && <div className="backup-rows">{group.backups.map((backup) => <div className="backup-row" key={backup.manifest_key}><span><strong><time title={formatDate(backup.taken_at)}>{relativeTime(backup.taken_at)}</time></strong><small>{formatDateTime(backup.taken_at)} · {formatBytes(backup.size_bytes)} · {backup.table_count} table{backup.table_count === 1 ? "" : "s"} · PostgreSQL {backup.postgres_version.split(" ")[0]}{discovery?.installation_id && backup.installation_id !== discovery.installation_id ? " · from another server" : ""}</small></span><Button variant="secondary" size="sm" onClick={() => setSelected(asManifest(backup))}><RotateCcw size={14} />Restore</Button></div>)}
-        {discovered?.has_more && <p className="caption">Showing the newest {group.backups.length} of {discovered.count} backups of this database.</p>}
+        {discovered?.has_more && <><p className="caption">Showing the newest {group.backups.length} of {discovered.count} backups of this database.</p><Button size="sm" variant="secondary" loading={loadingPages.has(group.dbName)} onClick={() => void loadOlder(group)}>Load older backups</Button></>}
       </div>}
     </details>;
   }

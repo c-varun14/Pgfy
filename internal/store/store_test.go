@@ -111,7 +111,10 @@ func TestMigrationsSessionsAndReadiness(t *testing.T) {
 	if e := s.Setup(ctx, token, "admin@example.com", "hash", "initial", "scope", now); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.AddSession(ctx, "session", "scope", now); e != nil {
+	if e := s.AddSession(ctx, "session", "scope", "stale-hash", now); !errors.Is(e, ErrCredentialsChanged) {
+		t.Fatal("a session was opened for a password that is no longer current", e)
+	}
+	if e := s.AddSession(ctx, "session", "scope", "hash", now); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := s.Session(ctx, "session", "scope", now); e != nil {

@@ -32,6 +32,76 @@ func enrolAdmin(t *testing.T, s *Store, now time.Time) {
 	}
 }
 
+func TestStaleEnrolmentScopeCannotMutateAdministrator(t *testing.T) {
+	for _, kind := range []string{"setup", "upgrade", "reset"} {
+		t.Run(kind, func(t *testing.T) {
+			s, _ := openTest(t)
+			ctx := context.Background()
+			now := time.Unix(1_800_000_000, 0)
+			c := Confirmed{Enrolment: Enrolment{Kind: kind, Scope: "old-generation", Email: "admin@example.com", PasswordHash: "replacement"}, SecretSealed: "replacement-factor", Step: 30}
+			switch kind {
+			case "setup":
+				token, e := s.NewSetupToken(ctx, now)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e := s.BeginEnrolment(ctx, token, "stale-enrol", "payload", now); e != nil {
+					t.Fatal(e)
+				}
+			case "upgrade":
+				token, e := s.NewSetupToken(ctx, now)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e := s.Setup(ctx, token, c.Email, "original", "old-session", "old-generation", now); e != nil {
+					t.Fatal(e)
+				}
+				c.Binding = security.Hash("original")
+				if e := s.BeginUpgrade(ctx, "stale-enrol", "payload", now); e != nil {
+					t.Fatal(e)
+				}
+			case "reset":
+				enrolAdmin(t, s, now)
+				token, e := s.NewResetToken(ctx, now)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e := s.BeginReset(ctx, token, "stale-enrol", "payload", now); e != nil {
+					t.Fatal(e)
+				}
+				if e := s.BeginPending(ctx, "pending", "hash-1", "scope", now); e != nil {
+					t.Fatal(e)
+				}
+			}
+			// Include sessions, other tokens, audit and alert records in the snapshot.
+			// A stale reset used to replace credentials and delete those sessions/tokens.
+			snapshot := func() string {
+				t.Helper()
+				var state string
+				if e := s.DB.QueryRow(`SELECT json_object(
+					'admin', (SELECT json_group_array(json_object('email',email,'password',password_hash,'factor',totp_secret_sealed,'step',totp_last_step,'failures',code_failures,'locked',code_locked_until)) FROM administrator),
+					'sessions', (SELECT count(*) FROM sessions),
+					'tokens', (SELECT count(*) FROM auth_tokens),
+					'audit', (SELECT count(*) FROM audit),
+					'alerts', (SELECT count(*) FROM alert_events))`).Scan(&state); e != nil {
+					t.Fatal(e)
+				}
+				return state
+			}
+			before := snapshot()
+			if _, e := s.ConfirmEnrolment(ctx, "stale-enrol", "new-session", "new-generation", "req", now, confirmWith(c, nil)); !errors.Is(e, ErrToken) {
+				t.Fatal("a stale enrolment was accepted", e)
+			}
+			if after := snapshot(); after != before {
+				t.Fatalf("rejection changed administrator state:\nbefore %s\nafter  %s", before, after)
+			}
+			if _, e := s.EnrolmentPayload(ctx, "stale-enrol", now); !errors.Is(e, ErrToken) {
+				t.Fatal("a stale enrolment was not consumed", e)
+			}
+		})
+	}
+}
+
 func TestSetupTokenIsSpentAtEnrolmentAndCanBeReissuedAfterTheWindow(t *testing.T) {
 	s, _ := openTest(t)
 	ctx := context.Background()
