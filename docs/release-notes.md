@@ -1,6 +1,15 @@
 # Release notes
 
-## Unreleased — Tier 1 (`mvp-to-production`)
+## v0.4.0 — fixes after review
+
+- Each backup records the storage target it was written to, and retention reads a manifest again before deleting it.
+- Manifests are limited to 8 MiB when written and read.
+- A sign-in that races an administrator reset can no longer open a session for the old password.
+- Very long `pg_restore` error lines can no longer stall a restore.
+- Disk, clock and certificate-delivery alerts are tracked separately, so one failed measurement does not clear the others.
+- Backups page: load older backups per database; a fresh install submits the default bucket protection.
+
+## v0.4.0 — Tier 1
 
 - **Delete a database** from its page (or `DELETE /api/v1/projects/{id}`): type its name; without a recoverable backup
   newer than the backup interval, accept the loss explicitly. A durable job disables logins, ends sessions, drops the
@@ -17,7 +26,7 @@
 - Deferred by decision (single administrator): weekly automated restore verification, bundle signing, Slack/Discord
   adapters and SMTP (the webhook already serves Slack, and Discord through `/slack`), and an audit view.
 
-## Unreleased — second factor (`mvp-to-production`)
+## v0.4.0 — second factor
 
 - HTTPS mode requires an authenticator-app code after the password; setup enrols the factor before the administrator
   exists, and an existing administrator enrols one at the next sign-in. Keys are typed, not scanned; no new
@@ -28,7 +37,7 @@
   when a code confirms, signing out every session.
 - Setup, reset, enrolment and pending tokens share one table; the setup token table is migrated into it.
 
-## Unreleased — alerts (`mvp-to-production`)
+## v0.4.0 — alerts
 
 - One generic JSON webhook (Settings → Alerts), sealed, with a test button and optional HMAC signing. It covers failing
   and late backups, interrupted jobs, PostgreSQL unreachable for five minutes, low disk, a silent host report, clock
@@ -37,7 +46,7 @@
   conditions that cannot be checked are never reported resolved.
 - Slack incoming webhooks work without an adapter; Discord via its `/slack` URL.
 
-## Unreleased — host status and upkeep (`mvp-to-production`)
+## v0.4.0 — host status and upkeep
 
 - `pgfy-host-status.timer` records free disk (PostgreSQL volume, backup workspace, `/`) and clock synchronisation every
   five minutes; Settings shows them, and says when the report is missing or stale.
@@ -49,7 +58,7 @@
 - A [host runbook](host-runbook.md): maintenance ownership, patch and reboot cadence with validation, break-glass
   access, retiring a database, client acceptance of the backup target, and bucket protection per provider.
 
-## Unreleased — access and capacity (`mvp-to-production`)
+## v0.4.0 — access and capacity
 
 - Databases whose policy admits any address show "Open to the internet" on their card and page. The default is
   unchanged.
@@ -62,7 +71,7 @@
 - An append-only audit table records rotations, access, freeze, limits and settings changes.
 - Updating installs the new PostgreSQL grants through the release's converge step.
 
-## Unreleased — updater (`mvp-to-production`)
+## v0.4.0 — updater
 
 - `pgfyctl update <bundle>` moves an installation to a newer release: verify, pause jobs and changes (`--drain` waits
   for a running backup), snapshot SQLite and the rewritten files, switch, migrate, verify readiness, and roll back
@@ -74,7 +83,7 @@
   minor version) by the release itself.
 - The CI integration run exercises a rollback after a test-only migration; tagged release builds do not.
 
-## Unreleased — Tier 0 A: backup correctness (`mvp-to-production`)
+## v0.4.0 — Tier 0 A: backup correctness
 
 Post-hackathon work from `docs/phases.md` Phase 6. This is the last release that ships as a manual reinstall;
 the update procedure comes next.
