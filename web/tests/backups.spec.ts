@@ -48,7 +48,8 @@ test.describe("backups", () => {
     await expect(card.getByRole("alert")).toHaveCount(0);
     // A concurrent backup starts polling; already loaded pages must survive it.
     busy = true;
-    await page.getByLabel("Backups by database").getByRole("button", { name: "Back up now" }).first().click();
+    // shop, not the first card: the mock is shared, and a new blog backup would change the deletion tests.
+    await page.getByLabel("Backups by database").locator("details").filter({ hasText: "app_shop" }).getByRole("button", { name: "Back up now" }).click();
     const previousRequests = discoveryRequests;
     await expect.poll(() => discoveryRequests).toBeGreaterThan(previousRequests);
     await expect(card.locator(".backup-row")).toHaveCount(40);
