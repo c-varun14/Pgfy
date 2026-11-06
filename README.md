@@ -1,62 +1,154 @@
 # Pgfy
 
-A self-hosted PostgreSQL foundation for small projects: your server, your data, one administrator.
+**PostgreSQL for all your small projects, on one server you own — with backups you can actually restore.**
 
-The intended MVP lets you install one release on a compatible VPS and configure an existing S3-compatible backup bucket in Settings. Compute
-and storage are independent choices; neither requires an AWS account. The initial portability validation is part of the MVP, with targets
-and pending evidence listed in [the validation document](docs/phase1-validation.md#portability-validation-targets).
+Pgfy turns a single Linux VPS into a managed home for the PostgreSQL databases behind your side projects, SaaS
+experiments and client apps. You get a dashboard to create databases, hand out safe connection strings, control who
+can connect, and back everything up to S3-compatible storage — and when the server is gone, you get the databases back
+on a new one from the bucket alone.
 
-The implementation is a Go application with an embedded React dashboard, SQLite management state, PostgreSQL 18.6, and Caddy.
+You keep the server, the data and the bill. Pgfy does the database operations work in between.
 
-## Implemented
+## Why Pgfy exists
 
-- One-command install with HTTPS-first dashboard access, single-admin setup with a mandatory authenticator-app second factor over HTTPS, an SSH-issued access reset, sessions, CSRF, rate limits.
-- Projects: one name creates a database, a restricted role and a strong password; resumable provisioning with honest failure states and retry.
-- Connection details with `sslmode=verify-full`, driver snippets, an SSH-tunnel path, and an observed connection check from the application environment.
-- Freeze writes per project (reads continue, writes are rejected, sessions reconnect read-only) so a backup taken before moving a database is complete.
-- Database TLS with the dashboard certificate delivered to PostgreSQL by `pgfyctl sync-db-cert` (daily timer); per-project allowed-address rules applied and verified through PostgreSQL's own parser and reload; TLS-only remote access; cross-project isolation.
-- Backups to any S3-compatible bucket configured in Settings: storage check, a configurable target interval, manual backups, manifests published last, durable one-at-a-time jobs that survive browser closure and report restarts as interrupted. A failing database backs off and never blocks the ones behind it.
-- Retention keyed off the bucket: the newest backup of each database plus a daily and weekly series, deleting the manifest before the archive and only when the bucket keeps versions of deleted objects.
-- Access and capacity: an "Open to the internet" marker, a connection budget with reserved slots for the dashboard, per-database guardrails and connection limits, and password rotation that ends old sessions. Administrative actions are recorded in an append-only audit table.
-- Alerts to one JSON webhook (Slack-compatible) for failing or late backups, PostgreSQL down, low disk, clock drift, certificate expiry, connection pressure and more, each at most daily with a resolved message.
-- Host status (disk, clock, certificate expiry) reported every five minutes and shown in Settings; unattended security updates; a [host runbook](docs/host-runbook.md).
-- Host-side updates with `pgfyctl update`: jobs paused, SQLite and configuration snapshotted, readiness verified, and an automatic rollback to the previous release on any failure. See [Updating](docs/installation.md#updating).
-- Database deletion as a durable job: the name typed to confirm, a recent backup or an explicit acknowledgment, logins disabled and sessions ended, database, user and access rule dropped; it resumes after a restart. Bucket backups stay under retention.
-- A recovery kit (`pgfyctl export-recovery-kit`) and daily copies of management storage, for damaged metadata on a surviving server; a preferred hour for daily backups; PostgreSQL memory sized from the host.
-- Recovery on a fresh install from the bucket alone: checksum, version compatibility, restore into a new project, named verification checks reported as verified, partly verified or not verified, credential handoff. See the [recovery runbook](docs/recovery-runbook.md).
+If you build more than one thing, you end up with more than one database. Each project starts small, but each one
+wants somewhere to live:
 
-## Planned, not implemented
+- **A managed database per project adds up.** Paying a hosted provider separately for every small app, demo and
+  client project gets expensive long before any of them has real traffic.
+- **A shared VPS is cheap but becomes a second job.** Putting every database on one server spreads the cost, but now
+  you are the DBA: creating roles by hand, editing `pg_hba.conf`, wiring up TLS, writing backup cron jobs, patching
+  the host, and hoping nothing breaks.
+- **Most self-hosted backups are never tested.** A `pg_dump` cron job that writes somewhere is not the same as being
+  able to bring a database back on a fresh machine at 2 a.m. You usually find out which one you have when it is too
+  late.
 
-- The evidence still owed to the [production gate](docs/production-gate.md), from the post-hackathon
-  [production-readiness roadmap](docs/phases.md#phase-6--post-demo-hardening-and-operation) (Phase 6). That work happens on the
-  `mvp-to-production` branch; `main` is the hackathon submission.
-- Deferred to Tier 2 to keep a one-administrator tool simple: weekly automated restore verification, bundle signing, Slack/Discord adapters and SMTP, and an audit view ([why, and what would bring each back](docs/phases.md#tier-1--during-the-first-month-of-operation)).
-- The two-host portability evidence in [the validation document](docs/phase1-validation.md) remains an operator checklist.
+Pgfy exists to keep the cheap option without the second job. It is built for **students, indie developers and small
+agencies** running several modest PostgreSQL workloads under one trusted administrator. It reduces the operational
+work of self-hosting; it does not pretend to remove it.
 
-This is a hackathon MVP with production-shaped foundations, not a production-ready service; complete the Phase 6 roadmap and gate in [the phases document](docs/phases.md#phase-6--post-demo-hardening-and-operation) before real workloads.
+## What it does
 
-## Installation
+Pgfy is organised around three things you need from a database server.
 
-Use a checksummed GitHub release bundle on Ubuntu 24.04 LTS x86-64. The server requires Docker Engine 28+ and Compose 2.30+, or the installer can install the pinned packages when Docker is absent. Go and Node are build-time dependencies only.
+### 1. Create a database in one step
 
-Prepare the VPS, root/sudo access, and DNS/firewall rules, or use explicit SSH-tunnel access. The planned backup feature takes an existing
-private S3-compatible bucket and scoped credentials through Settings. Pgfy installs the software; infrastructure is supplied by the operator.
-The single-command `curl` bootstrap and release packaging are implemented and tested locally; release publication and Lightsail acceptance
-remain pending. See the installation guide for the copy-paste command and the downloaded-bundle alternative.
+Type a project name. Pgfy creates the database, a restricted role that can only reach that database, and a strong
+generated password. Provisioning is resumable: an interrupted create picks up where it stopped and never produces a
+silent duplicate.
 
-- [Generic installation and host recovery](docs/installation.md)
-- [Lightsail deployment](docs/lightsail.md)
-- [Test server SSH access and agent handoff](docs/deployment-access.md)
-- [Recovery runbook](docs/recovery-runbook.md)
-- [Host runbook](docs/host-runbook.md)
-- [Demo application](demo/README.md)
-- [Validation evidence and acceptance checklist](docs/phase1-validation.md)
-- [API and security behavior](docs/api.md)
-- [Product brief](docs/idea.md) and [implementation phases](docs/phases.md)
+### 2. Connect your application safely
+
+- Copy-paste connection details with `sslmode=verify-full`, driver snippets, and an SSH-tunnel path for local work.
+- Database TLS uses the same publicly trusted certificate as the dashboard, renewed and delivered automatically.
+- Per-project allowed-address rules, applied and checked through PostgreSQL's own parser — or mark a database as open
+  to the internet (TLS plus password) with a visible warning, for apps on platforms without a stable outbound address.
+- A connection check you run from the application's own environment, so "connected" means something.
+- Projects are isolated from each other; password rotation ends old sessions; per-database connection limits and a
+  shared connection budget keep one app from starving the rest.
+
+### 3. Recover when things go wrong
+
+- Backups to any S3-compatible bucket you choose, on a schedule you set (every 1, 6, 12 or 24 hours, with a preferred hour for daily runs), plus
+  "Back up now". Jobs survive browser closure and restarts, and a failing database backs off without blocking others.
+- Retention keeps the newest backup of each database plus daily and weekly series, and only deletes when the bucket
+  keeps versions of deleted objects.
+- **Recovery from the bucket alone** on a freshly installed server: integrity and version checks, restore into a new
+  project, and named verification checks reported honestly as *verified*, *partly verified* or *not verified*.
+  New credentials are handed off for your application.
+- A recovery kit (`pgfyctl export-recovery-kit`) and daily copies of management state for a damaged-but-surviving
+  server.
+
+### And the operational basics
+
+- One-command install with HTTPS before any credentials are entered, a single administrator with a mandatory
+  authenticator-app second factor, and an SSH-issued access reset.
+- Alerts to a JSON webhook (Slack-compatible) for failing or late backups, PostgreSQL down, low disk, clock drift,
+  certificate expiry and connection pressure — each at most daily, with a resolved message.
+- Host status, unattended security updates, and `pgfyctl update` with an automatic rollback if anything fails.
+- Freeze writes on a project before moving it; delete a database as a durable, confirmed job.
+- An append-only audit record of administrative actions.
+
+## What Pgfy is not
+
+Being honest about limits is part of the product:
+
+- **One server, not high availability.** Projects share CPU, memory, disk and the server's failure risk. Credentials
+  separate projects logically; they do not give each one dedicated resources. Recovery restores to the latest backup;
+  writes after it are not recovered, and there is no point-in-time recovery or automatic failover.
+- **One administrator.** There are no teams, roles or customer accounts, and it is not a public multi-tenant database
+  service.
+- **It does not provision infrastructure.** You bring the VPS, DNS, firewall and bucket; Pgfy installs and runs the
+  software on them. Nothing requires an AWS account, and compute and storage providers are independent choices.
+- **Databases only.** Your applications run elsewhere and connect directly. There is no SQL editor and no connection
+  pooler yet.
+
+## Get started
+
+You need an Ubuntu 24.04 LTS x86-64 VPS with root/sudo access and a DNS name pointing at it (or SSH-tunnel access
+without a domain). Docker Engine 28+ and Compose 2.30+ are used when present, or installed at pinned versions.
+
+```sh
+(
+  set -eu
+  pgfy_bootstrap_dir=$(mktemp -d)
+  trap 'rm -rf "$pgfy_bootstrap_dir"' EXIT
+  curl --disable --fail --silent --show-error --location \
+    --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 \
+    https://github.com/c-varun14/Pgfy/releases/latest/download/bootstrap.sh \
+    -o "$pgfy_bootstrap_dir/bootstrap.sh"
+  sudo bash "$pgfy_bootstrap_dir/bootstrap.sh" --hostname db-admin.example.com
+)
+```
+
+The bootstrap verifies the release checksum before running anything, installs PostgreSQL 18, the dashboard and Caddy,
+and prints the HTTPS address and setup token. Then open Settings, add your S3-compatible bucket, and create your first
+project. The [installation guide](docs/installation.md) covers the full command, tunnel mode, downloaded bundles and
+updates.
+
+## Documentation
+
+| Running Pgfy | Reference |
+| --- | --- |
+| [Installation and updates](docs/installation.md) | [API and security behaviour](docs/api.md) |
+| [Recovery runbook](docs/recovery-runbook.md) | [Product design](docs/idea.md) |
+| [Host runbook](docs/host-runbook.md) | [Release notes](docs/release-notes.md) |
+| [Lightsail deployment](docs/lightsail.md) | [Roadmap and build history](docs/phases.md) |
+| [Demo application](demo/README.md) | [Production checklist](docs/production-gate.md) |
+
+## How it works
+
+```mermaid
+flowchart LR
+  browser[Browser] -->|HTTPS| caddy[Caddy]
+  apps[Your applications] -->|TLS, verify-full| pg
+  caddy -->|Proxy network| app[Pgfy: Go + embedded React]
+  app --> sqlite[(SQLite: management state)]
+  app -->|Private database network| pg[(PostgreSQL 18)]
+  app -->|Backups and recovery| s3[(S3-compatible bucket)]
+  operator[Operator over SSH] --> ctl[Installer / pgfyctl]
+  ctl --> compose[Docker Compose]
+```
+
+Three containers: Caddy for HTTPS, one Go application with the React dashboard embedded, and PostgreSQL. Management
+state lives in SQLite so the dashboard keeps working — and can help you diagnose — when PostgreSQL is down. Backup and
+restore jobs run in a durable in-process queue; there is no Redis, separate worker or Node server. The dashboard has no
+Docker socket, no Caddy admin access, no bootstrap superuser credential and no cloud provider API access; host-level
+operations go through `pgfyctl` over SSH.
+
+## Status
+
+Pgfy is at v0.4 and feature-complete for its single-administrator scope: create, connect, back up, recover, alert and
+update are all implemented and covered by unit, browser and Compose integration tests. The
+[production checklist](docs/production-gate.md) tracks the evidence that can only come from real servers and real
+operation — certificate renewals, a full recovery rehearsal, measured resource use — and we recommend working through it
+before moving important workloads. Next on the roadmap: weekly automated restore verification, signed release bundles
+and more notification channels.
 
 ## Development
 
-Use Go 1.27.1, Node 24.18.0, pnpm 10.17.1, Python 3, and Docker. Dependency versions and container image digests are committed.
+Use Go 1.27.1, Node 24.18.0, pnpm 10.17.1, Python 3, and Docker. Dependency versions and container image digests are
+committed.
 
 ```sh
 make install-deps
@@ -65,7 +157,9 @@ make browser-test
 make integration
 ```
 
-Build frontend assets before compiling Go because the executable embeds `web/dist`. `make integration` builds the application image, runs an isolated three-service fixture on `127.0.0.1:8080`, and removes only its generated test containers and volumes. Do not run it simultaneously with the browser fixture, which uses the same port.
+Build frontend assets before compiling Go because the executable embeds `web/dist`. `make integration` builds the
+application image, runs an isolated three-service fixture on `127.0.0.1:8080`, and removes only its generated test
+containers and volumes. Do not run it simultaneously with the browser fixture, which uses the same port.
 
 For a disposable dashboard preview:
 
@@ -74,35 +168,23 @@ make build
 python3 scripts/e2e-server.py
 ```
 
-Open `http://127.0.0.1:8080`; read the temporary setup token from `.cache/e2e-token` in a second terminal. PostgreSQL intentionally reports unavailable in this browser fixture. Stopping it removes its SQLite database and key. Never bind this development fixture to a public interface.
+Open `http://127.0.0.1:8080`; read the temporary setup token from `.cache/e2e-token` in a second terminal. PostgreSQL
+intentionally reports unavailable in this browser fixture. Stopping it removes its SQLite database and key. Never bind
+this development fixture to a public interface.
 
-`PGFY_INTEGRATION_HOLD=300 python3 scripts/integration.py` keeps the integration stack running for five minutes after the checks (credentials in `.cache/integration-hold.json`) so the full dashboard, including projects, backups and recovery against a local S3-compatible store, can be explored at `http://127.0.0.1:8080`.
+`PGFY_INTEGRATION_HOLD=300 python3 scripts/integration.py` keeps the integration stack running for five minutes after
+the checks (credentials in `.cache/integration-hold.json`) so the full dashboard, including projects, backups and
+recovery against a local S3-compatible store, can be explored at `http://127.0.0.1:8080`.
 
-For frontend hot reload, start `python3 scripts/e2e-server.py --backend-only` and run `pnpm --dir web dev` in another terminal. Vite serves loopback port 8080 and forwards API calls to the disposable backend on loopback port 3000, preserving the configured authentication origin.
-
-## Architecture
-
-```mermaid
-flowchart LR
-  browser[Browser] -->|HTTPS| caddy[Caddy]
-  caddy -->|Proxy network| app[Go + embedded React]
-  app --> sqlite[(SQLite)]
-  app -->|Private database network| pg[(PostgreSQL 18.6)]
-  operator[Host operator] --> installer[Installer / pgfyctl]
-  installer --> compose[Docker Compose]
-  compose --> caddy
-  compose --> app
-  compose --> pg
-```
-
-Caddy routes independently of database readiness. The dashboard has no Docker socket, Caddy admin access, bootstrap database credential, or provider API integration. PostgreSQL has no host port mapping in Phase 1.
+For frontend hot reload, start `python3 scripts/e2e-server.py --backend-only` and run `pnpm --dir web dev` in another
+terminal. Vite serves loopback port 8080 and forwards API calls to the disposable backend on loopback port 3000,
+preserving the configured authentication origin.
 
 ## Releases
 
-Pull requests and main pushes run verification. Version tags run verification before publishing an image to GHCR and a checksummed bundle to GitHub Releases. The release workflow also tests the release image and verifies an anonymous pull before publishing its bundle. The repository owner must make the GHCR package publicly pullable; if that check fails, change package visibility and rerun the workflow. No release is published by local builds.
-
-Each release also publishes `bootstrap.sh` and its checksum. Fresh installations default to the latest stable release; `--version` selects
-an explicit release and reruns retain the installed version. Prerelease tags are marked as prereleases. CI verifies public asset downloads
-after publication. Follow the [Phase 1 release handoff](docs/phase1-release.md) for the remaining publication and deployment steps.
-
-Maintainers explicitly refresh image digests with `python3 scripts/resolve-images.py`, review the resulting changes, and retest. Installers never resolve newer tags or update existing installations implicitly.
+Pull requests and pushes to `main` run verification. Version tags run verification before publishing an image to GHCR
+and a checksummed bundle, plus `bootstrap.sh` and its checksum, to GitHub Releases. The release workflow tests the
+release image and verifies an anonymous pull and public asset downloads. Fresh installations default to the latest
+stable release; `--version` selects an explicit one, and reruns keep the installed version. Installers never resolve
+newer tags or update an installation implicitly — updates go through `pgfyctl update`. Maintainers refresh image digests
+explicitly with `python3 scripts/resolve-images.py`, then review and retest.

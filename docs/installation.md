@@ -11,7 +11,7 @@
 The generic installer never calls provider APIs or metadata services. The operator configures networking/firewalls; see the separate Lightsail guide for that environment.
 
 The operator provisions the VPS, has root/sudo access, and prepares DNS/firewall rules (or uses the explicit SSH tunnel below). Pgfy installs
-the software on that server. For the planned backup feature, the operator also creates a private S3-compatible bucket and scoped credentials,
+the software on that server. For backups, the operator also creates a private S3-compatible bucket and scoped credentials,
 then enters them in Settings. Storage is not required for initial dashboard installation. Provider independence applies to hosts meeting the
 requirements above; it does not imply support for every operating system or architecture.
 

@@ -1,4 +1,9 @@
-# Implementation phases
+# Roadmap and build history
+
+This is the plan Pgfy was built from, kept as a record of what was built, in what order and why. Phases 1–5 built the
+first working release, during the AWS First Commit event; Phase 6 is the hardening that followed and is now implemented, with the remaining real-server evidence tracked in the
+[production checklist](production-gate.md). For what ships today, see the [README](../README.md) and
+[release notes](release-notes.md).
 
 Build a complete app around three journeys: create a database, connect safely, and recover after server loss.
 
@@ -270,7 +275,7 @@ submission. Clearly identify any remaining required feature as unfinished rather
 ## Phase 6 — Post-demo hardening and operation
 
 Goal: Run one low-stakes application with tested recovery and explicit maintenance responsibilities, then expand to the operator's own
-client databases. Everything in this phase is post-hackathon work on the `mvp-to-production` branch; `main` remains the submitted MVP.
+client databases. This phase was developed on the `mvp-to-production` branch and has been merged into `main`.
 
 The roadmap below was agreed on 2026-09-22 after three review rounds against the code. The gate checklist that closed the MVP plan is kept
 unchanged at the end of this phase as the acceptance list; the tiers describe what has to be built so that every gate item has something to
@@ -420,7 +425,7 @@ rollback), B (open-to-internet marker, connection budget with reserved slots, pe
 audit table), the rest of C (host status timer, certificate expiry, unattended upgrades, host runbook, webhook alerts)
 and D (TOTP second factor mandatory over HTTPS, SSH-issued reset). Each is covered by unit tests and by the local
 Compose integration run; the evidence the gate still needs from real servers and real operation is tracked in the
-[production gate checklist](production-gate.md).
+[production checklist](production-gate.md).
 
 Tier 1, as scoped down above, is implemented (2026-10-02): project deletion as a durable job with a `deleting`
 tombstone, `pgfyctl export-recovery-kit` and daily SQLite copies, a preferred backup hour, and PostgreSQL memory sized
@@ -431,10 +436,10 @@ are deferred (Tier 2).
 
 ### Sequencing
 
-A → the updater → B → the rest of C → D → Tier 1 → the gate below → remove the "hackathon MVP" wording. A comes before the updater
+A → the updater → B → the rest of C → D → Tier 1 → the gate below. A comes before the updater
 because the fairness and truncation defects can lose backups today and A itself ships as the last manual reinstall; the updater is needed to
-ship everything after it. Each slice is a commit series on `mvp-to-production` prefixed with its roadmap item; the branch merges to `main`
-only when the gate passes.
+ship everything after it. Each slice was a commit series on `mvp-to-production` prefixed with its roadmap item, merged into `main` once
+reviewed; the gate below is evidence collected on real servers and is tracked separately.
 
 ### Production gate (unchanged acceptance list)
 

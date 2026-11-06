@@ -1,9 +1,9 @@
-# Production gate checklist
+# Production checklist
 
-The [production gate](phases.md#production-gate-unchanged-acceptance-list) must pass before `mvp-to-production` merges
-to `main` and before real client databases move onto Pgfy. Tier 0 built what each item needs; this page records, per
-item, what automated tests already show and what still has to be done on real servers or over time. "Pending" items are
-not claims: they are the work left.
+Pgfy's features are built and tested; this checklist is the operational evidence to collect on your own servers before
+moving important databases onto them. It follows the [production gate](phases.md#production-gate-unchanged-acceptance-list):
+for each item, what automated tests already show and what still has to be done on real hosts or over time. "Pending"
+items are not claims: they are the work left for the operator.
 
 | Gate item | Covered by automated tests | Still to do (by the operator) |
 | --- | --- | --- |
@@ -29,4 +29,4 @@ Tier 1 additions also owe evidence from a real host; none of it is claimed yet:
 - **Pending:** after the update that ships this release, check `SHOW shared_buffers` on the production host against
   the host's memory, and watch memory during a backup of the real dataset (row above).
 
-When every row is Done, remove the "hackathon MVP" wording from the README and merge the branch.
+When every row is Done, the installation has the evidence to carry client databases.
